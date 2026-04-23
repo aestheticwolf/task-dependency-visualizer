@@ -9,16 +9,22 @@ import {
    CSS
 ═══════════════════════════════════════════════════════ */
 const CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Syne:wght@700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700;800&display=swap');
 
 .auth-root *, .auth-root *::before, .auth-root *::after {
   box-sizing: border-box; margin: 0; padding: 0;
 }
 
+.auth-root button,
+.auth-root input {
+  font: inherit;
+}
+
 .auth-root {
   min-height: 100vh;
   display: flex; align-items: center; justify-content: center;
-  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-family: 'Open Sans', sans-serif;
+  line-height: 1.5;
   position: relative; overflow: hidden;
   transition: background 0.5s ease;
 }
@@ -94,7 +100,7 @@ const CSS = `
   background: rgba(0,0,0,0.15);
   backdrop-filter: blur(16px);
   color: #94a3b8;
-  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-family: 'Open Sans', sans-serif;
   font-size: 13px; font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
@@ -152,7 +158,7 @@ const CSS = `
   50%      { box-shadow: 0 0 44px rgba(124,58,237,0.55); }
 }
 .auth-logo-name {
-  font-family: 'Syne', sans-serif;
+  font-family: 'Open Sans', sans-serif;
   font-size: 24px; font-weight: 800; letter-spacing: -0.8px;
   transition: color 0.3s;
 }
@@ -177,7 +183,7 @@ const CSS = `
 .auth-tab {
   flex: 1; padding: 11px 6px;
   border: none; border-radius: 10px;
-  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-family: 'Open Sans', sans-serif;
   font-size: 14px; font-weight: 700;
   cursor: pointer; transition: all 0.22s ease; background: transparent;
 }
@@ -219,7 +225,7 @@ const CSS = `
 .auth-input {
   width: 100%; padding: 15px 15px 15px 48px;
   border-radius: 12px;
-  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-family: 'Open Sans', sans-serif;
   font-size: 14px; font-weight: 500; outline: none;
   transition: all 0.22s ease;
 }
@@ -234,7 +240,7 @@ const CSS = `
 .auth-btn {
   width: 100%; padding: 16px;
   border: none; border-radius: 13px;
-  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-family: 'Open Sans', sans-serif;
   font-size: 15px; font-weight: 800;
   cursor: pointer; letter-spacing: -0.2px;
   position: relative; overflow: hidden;
@@ -275,12 +281,87 @@ const CSS = `
 }
 .dark  .auth-footer { color: #475569; }
 .light .auth-footer { color: #94a3b8; }
-.auth-footer a {
-  font-weight: 800; text-decoration: none; transition: opacity 0.2s; cursor: pointer;
+.auth-footer .auth-link {
+  border: none; background: transparent; padding: 0;
+  font: inherit; font-weight: 800; text-decoration: none;
+  transition: opacity 0.2s; cursor: pointer;
 }
-.dark  .auth-footer a { color: #00d4ff; }
-.light .auth-footer a { color: #7c3aed; }
-.auth-footer a:hover { opacity: 0.7; }
+.dark  .auth-footer .auth-link { color: #00d4ff; }
+.light .auth-footer .auth-link { color: #7c3aed; }
+.auth-footer .auth-link:hover { opacity: 0.7; }
+
+@media (max-width: 720px) {
+  .auth-root {
+    align-items: flex-start;
+    justify-content: center;
+    min-height: 100dvh;
+    overflow-y: auto;
+    padding: 92px 18px 34px;
+  }
+  .auth-back-btn {
+    top: 16px;
+    left: 16px;
+    padding: 9px 14px;
+    font-size: 12px;
+  }
+  .auth-theme-btn {
+    top: 16px;
+    right: 16px;
+    width: 42px;
+    height: 42px;
+    font-size: 18px;
+  }
+  .auth-card-wrap {
+    width: min(100%, 460px);
+  }
+  .auth-card {
+    width: 100%;
+    padding: 38px 28px;
+  }
+  .auth-logo-row {
+    margin-bottom: 28px;
+  }
+}
+
+@media (max-width: 420px) {
+  .auth-root {
+    padding: 84px 14px 28px;
+  }
+  .auth-card {
+    padding: 30px 20px;
+    border-radius: 21px;
+  }
+  .auth-card-wrap {
+    border-radius: 24px;
+  }
+  .auth-logo-row {
+    gap: 10px;
+  }
+  .auth-logo-icon {
+    width: 44px;
+    height: 44px;
+    border-radius: 13px;
+    font-size: 22px;
+  }
+  .auth-logo-name {
+    font-size: 20px;
+  }
+  .auth-logo-sub {
+    font-size: 9px;
+    letter-spacing: 1.3px;
+  }
+  .auth-tabs {
+    margin-bottom: 22px;
+  }
+  .auth-tab,
+  .auth-input,
+  .auth-btn {
+    font-size: 13px;
+  }
+  .auth-input {
+    padding: 13px 13px 13px 44px;
+  }
+}
 `;
 
 /* ── Particle canvas ── */
@@ -352,7 +433,6 @@ export default function Login({ setUser, onBack }) {
   });
 
   useEffect(() => {
-    try { localStorage.setItem("tg-dark", dark); } catch {}
     if (!document.getElementById("tg-auth-css")) {
       const s = document.createElement("style"); s.id = "tg-auth-css"; s.textContent = CSS;
       document.head.appendChild(s);
@@ -444,8 +524,8 @@ export default function Login({ setUser, onBack }) {
 
           <p className="auth-footer">
             {mode === "login"
-              ? <>Don't have an account? <a onClick={() => sw("signup")}>Sign up free</a></>
-              : <>Already registered? <a onClick={() => sw("login")}>Sign in</a></>}
+              ? <>Don't have an account? <button type="button" className="auth-link" onClick={() => sw("signup")}>Sign up free</button></>
+              : <>Already registered? <button type="button" className="auth-link" onClick={() => sw("login")}>Sign in</button></>}
           </p>
         </div>
       </div>

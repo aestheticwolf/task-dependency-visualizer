@@ -10,15 +10,19 @@ import {
   collection, addDoc, getDocs, deleteDoc,
   doc, onSnapshot, updateDoc,
 } from "firebase/firestore";
-import { MiniMap, Controls, Background } from "reactflow";
+import { MiniMap, Controls, Background, Position } from "reactflow";
 
 /* ═══════════════════════════════════════════════════════
    GLOBAL CSS
 ═══════════════════════════════════════════════════════ */
 const APP_CSS = `
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Syne:wght@700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;500;600;700;800&display=swap');
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+button, input, select, textarea {
+  font: inherit;
+}
 
 /* ══ Theme tokens ══ */
 .tgd { /* dark */
@@ -35,6 +39,12 @@ const APP_CSS = `
   --graph-bg:   #030b1a;
   --accent:     #00d4ff;
   --accent2:    #7c3aed;
+  --status-complete: #10b981;
+  --status-pending:  #f59e0b;
+  --status-blocked:  #ef4444;
+  --status-complete-bg: rgba(16,185,129,0.14);
+  --status-pending-bg:  rgba(245,158,11,0.13);
+  --status-blocked-bg:  rgba(239,68,68,0.12);
 }
 .tgl { /* light */
   --bg:         #f0f4ff;
@@ -50,24 +60,33 @@ const APP_CSS = `
   --graph-bg:   #e8eeff;
   --accent:     #7c3aed;
   --accent2:    #00d4ff;
+  --status-complete: #059669;
+  --status-pending:  #d97706;
+  --status-blocked:  #dc2626;
+  --status-complete-bg: rgba(209,250,229,0.88);
+  --status-pending-bg:  rgba(254,243,199,0.9);
+  --status-blocked-bg:  rgba(254,226,226,0.88);
 }
 
 /* ══ App shell ══ */
 .tg-shell {
   display: flex; height: 100vh; overflow: hidden;
-  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-family: 'Open Sans', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
   background: var(--bg);
   transition: background 0.4s;
 }
 
 /* ══ Panel ══ */
 .tg-panel {
-  width: 280px; flex-shrink: 0;
+  width: 300px; flex-shrink: 0;
   background: var(--panel-bg);
   border-right: 1px solid var(--border);
   display: flex; flex-direction: column;
   overflow: hidden;
   transition: background 0.4s, border-color 0.4s;
+  box-shadow: 18px 0 50px rgba(15,23,42,0.08);
   animation: tg-slide-in 0.4s cubic-bezier(0.16,1,0.3,1) both;
 }
 @keyframes tg-slide-in {
@@ -77,13 +96,20 @@ const APP_CSS = `
 
 /* ── Panel header ── */
 .tg-panel-head {
-  padding: 18px 18px 14px;
+  padding: 16px 16px 14px;
   border-bottom: 1px solid var(--border);
-  flex-shrink: 0; display: flex; align-items: center;
-  justify-content: space-between; gap: 8px;
+  flex-shrink: 0; display: flex; flex-direction: column;
+  align-items: stretch; justify-content: flex-start; gap: 12px;
+  background:
+    radial-gradient(circle at top left, rgba(0,212,255,0.09), transparent 45%),
+    linear-gradient(180deg, rgba(255,255,255,0.05), transparent);
 }
 .tg-brand-row {
   display: flex; align-items: center; gap: 10px;
+  min-width: 0;
+}
+.tg-brand-row > div:last-child {
+  min-width: 0;
 }
 .tg-brand-icon {
   width: 36px; height: 36px; border-radius: 11px;
@@ -97,23 +123,28 @@ const APP_CSS = `
   50%      { box-shadow: 0 0 28px rgba(124,58,237,0.5); }
 }
 .tg-brand-name {
-  font-family: 'Syne', sans-serif;
+  font-family: 'Open Sans', sans-serif;
   font-size: 15px; font-weight: 800; letter-spacing: -0.4px;
   color: var(--text-1); line-height: 1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .tg-brand-tag {
   font-size: 9px; font-weight: 700;
-  text-transform: uppercase; letter-spacing: 1.4px;
-  color: var(--accent); margin-top: 2px;
+  text-transform: uppercase; letter-spacing: 1.1px;
+  color: var(--accent); margin-top: 3px; line-height: 1.25;
 }
-.tg-head-actions { display: flex; gap: 6px; align-items: center; }
+.tg-head-actions {
+  display: flex; gap: 8px; align-items: center;
+  width: 100%;
+}
 .tg-icon-btn {
-  width: 32px; height: 32px; border-radius: 9px;
+  width: 36px; height: 36px; border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--card);
   color: var(--text-2); font-size: 16px;
   display: flex; align-items: center; justify-content: center;
   cursor: pointer; transition: all 0.2s;
+  flex: 0 0 36px;
 }
 .tg-icon-btn:hover {
   border-color: var(--border-hi);
@@ -122,13 +153,20 @@ const APP_CSS = `
 }
 .tg-logout-btn {
   display: flex; align-items: center; gap: 6px;
-  padding: 7px 12px; border-radius: 9px;
+  justify-content: center;
+  min-width: 0; height: 36px; flex: 1;
+  padding: 0 12px; border-radius: 10px;
   border: 1px solid rgba(239,68,68,0.2);
   background: rgba(239,68,68,0.06);
   color: #f87171;
-  font-family: 'Plus Jakarta Sans', sans-serif;
-  font-size: 12px; font-weight: 700;
+  font-family: 'Open Sans', sans-serif;
+  font-size: 12.5px; font-weight: 800;
+  line-height: 1; white-space: nowrap;
   cursor: pointer; transition: all 0.2s;
+}
+.tg-logout-btn span {
+  display: inline-flex; align-items: center;
+  font-size: 14px; line-height: 1;
 }
 .tg-logout-btn:hover {
   background: rgba(239,68,68,0.14);
@@ -138,8 +176,8 @@ const APP_CSS = `
 /* ── User pill ── */
 .tg-user-pill {
   margin: 12px 16px;
-  padding: 10px 13px;
-  border-radius: 11px;
+  padding: 10px 12px;
+  border-radius: 12px;
   background: var(--card);
   border: 1px solid var(--border);
   display: flex; align-items: center; gap: 10px;
@@ -154,7 +192,8 @@ const APP_CSS = `
 }
 .tg-user-email {
   font-size: 11.5px; font-weight: 600; color: var(--text-2);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
 }
 
 /* ── Panel body (scrollable) ── */
@@ -162,6 +201,7 @@ const APP_CSS = `
   flex: 1; overflow-y: auto; overflow-x: hidden;
   padding: 14px 14px 20px;
   display: flex; flex-direction: column; gap: 10px;
+  scrollbar-gutter: stable;
 }
 .tg-panel-body::-webkit-scrollbar { width: 3px; }
 .tg-panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 9px; }
@@ -173,6 +213,8 @@ const APP_CSS = `
 .tg-stat {
   background: var(--card); border: 1px solid var(--border);
   border-radius: 13px; padding: 13px 15px;
+  min-height: 70px;
+  display: flex; flex-direction: column; justify-content: center;
   transition: all 0.22s; cursor: default;
   animation: tg-pop 0.5s ease both;
 }
@@ -196,8 +238,9 @@ const APP_CSS = `
   color: var(--text-3); margin-bottom: 5px;
 }
 .tg-stat-val {
-  font-family: 'Syne', sans-serif;
+  font-family: 'Open Sans', sans-serif;
   font-size: 26px; font-weight: 800; line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ── Progress ── */
@@ -216,7 +259,7 @@ const APP_CSS = `
   text-transform: uppercase; letter-spacing: 0.9px; color: var(--text-3);
 }
 .tg-prog-pct {
-  font-family: 'Syne', sans-serif;
+  font-family: 'Open Sans', sans-serif;
   font-size: 13px; font-weight: 800; color: var(--accent);
 }
 .tg-prog-track {
@@ -225,12 +268,12 @@ const APP_CSS = `
 }
 .tg-prog-fill {
   height: 100%; border-radius: 999px;
-  background: linear-gradient(90deg, #00d4ff, #7c3aed);
+  background: linear-gradient(90deg, var(--status-complete), var(--accent));
   transition: width 0.65s cubic-bezier(0.4,0,0.2,1);
 }
 .tg-prog-sub {
   margin-top: 8px; font-size: 11.5px; font-weight: 600;
-  color: #fbbf24; display: flex; align-items: center; gap: 5px;
+  color: var(--status-blocked); display: flex; align-items: center; gap: 5px;
 }
 
 /* ── Section card ── */
@@ -238,6 +281,7 @@ const APP_CSS = `
   background: var(--card); border: 1px solid var(--border);
   border-radius: 13px; padding: 14px 15px;
   display: flex; flex-direction: column; gap: 9px;
+  box-shadow: 0 10px 26px rgba(15,23,42,0.04);
   transition: all 0.22s;
 }
 .tg-section:hover { border-color: var(--border-hi); }
@@ -247,26 +291,89 @@ const APP_CSS = `
   color: var(--text-3);
 }
 
-/* ── Legend ── */
-.tg-legend-row {
-  display: flex; align-items: center; gap: 9px;
-  font-size: 12.5px; font-weight: 600; color: var(--text-2);
+/* ── Status colors ── */
+.tg-dot {
+  width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0;
+  box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 12%, transparent);
 }
-.tg-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.tg-status-complete { color: var(--status-complete); }
+.tg-status-pending  { color: var(--status-pending); }
+.tg-status-blocked  { color: var(--status-blocked); }
+.tg-status-complete .tg-dot { background: var(--status-complete); }
+.tg-status-pending .tg-dot  { background: var(--status-pending); }
+.tg-status-blocked .tg-dot  { background: var(--status-blocked); }
+
+/* ── Graph legend ── */
+.tg-graph-legend {
+  position: absolute; top: 18px; right: 18px; z-index: 6;
+  width: min(280px, calc(100% - 36px));
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel-bg) 92%, transparent);
+  backdrop-filter: blur(16px);
+  box-shadow: 0 18px 50px rgba(15,23,42,0.12);
+  pointer-events: none;
+}
+.tg-graph-legend-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-bottom: 10px;
+}
+.tg-graph-legend-title {
+  color: var(--text-1);
+  font-size: 12px; font-weight: 800;
+  letter-spacing: 0.4px; text-transform: uppercase;
+}
+.tg-graph-legend-total {
+  color: var(--text-3);
+  font-size: 11px; font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.tg-graph-legend-items {
+  display: grid; gap: 8px;
+}
+.tg-graph-legend-item {
+  display: grid; grid-template-columns: auto 1fr auto;
+  align-items: center; gap: 9px;
+  color: var(--text-2);
+  font-size: 12px; font-weight: 700;
+}
+.tg-graph-legend-item .tg-dot {
+  width: 10px; height: 10px;
+}
+.tg-graph-legend-count {
+  color: var(--text-1);
+  font-size: 12px; font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+@supports not (background: color-mix(in srgb, white, transparent)) {
+  .tg-graph-legend {
+    background: var(--panel-bg);
+  }
+  .tg-dot {
+    box-shadow: 0 0 0 4px rgba(148,163,184,0.12);
+  }
+}
 
 /* ── Input / Select ── */
 .tg-input, .tg-select {
-  width: 100%; padding: 10px 13px;
+  width: 100%; min-height: 40px; padding: 10px 13px;
   border-radius: 9px;
   border: 1.5px solid var(--border);
   background: var(--input-bg);
   color: var(--text-1);
-  font-family: 'Plus Jakarta Sans', sans-serif;
-  font-size: 13px; font-weight: 500;
+  font-family: 'Open Sans', sans-serif;
+  font-size: 13px; font-weight: 600;
+  line-height: 1.25;
   outline: none; transition: all 0.2s;
   -webkit-appearance: none; appearance: none;
 }
 .tg-input::placeholder { color: var(--text-3); font-weight: 400; }
+.tg-select {
+  padding-right: 40px;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
 .tg-input:focus, .tg-select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(0,212,255,0.1);
@@ -278,16 +385,67 @@ const APP_CSS = `
 }
 .tgd .tg-select option { background: #0d1a35; color: #f1f5f9; }
 .tgl .tg-select option { background: #fff; color: #1e293b; }
+.tg-field-stack {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.tg-field-label {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  color: var(--text-2);
+  font-size: 11px; font-weight: 800;
+  letter-spacing: 0.7px; text-transform: uppercase;
+}
+.tg-field-hint {
+  color: var(--text-3);
+  font-size: 10.5px; font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.tg-select-wrap {
+  position: relative;
+}
+.tg-select-wrap::after {
+  content: "⌄";
+  position: absolute; right: 13px; top: 50%;
+  transform: translateY(-54%);
+  color: var(--text-3);
+  font-size: 18px; font-weight: 800;
+  pointer-events: none;
+  transition: color 0.2s, transform 0.2s;
+}
+.tg-select-wrap:focus-within::after {
+  color: var(--accent);
+  transform: translateY(-48%) rotate(180deg);
+}
+.tg-select-meta {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(0,212,255,0.035);
+  border: 1px solid rgba(0,212,255,0.08);
+  color: var(--text-3);
+  font-size: 11px; font-weight: 600;
+  line-height: 1.45;
+}
+.tgl .tg-select-meta {
+  background: rgba(124,58,237,0.035);
+  border-color: rgba(124,58,237,0.08);
+}
+.tg-select-meta strong {
+  color: var(--text-2);
+  font-weight: 800;
+}
 
 /* ── Buttons ── */
 .tg-btn {
-  width: 100%; padding: 11px 14px;
+  width: 100%; min-height: 40px; padding: 11px 14px;
   border: none; border-radius: 10px;
-  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-family: 'Open Sans', sans-serif;
   font-size: 13px; font-weight: 800;
   cursor: pointer; letter-spacing: -0.1px;
   position: relative; overflow: hidden;
   transition: all 0.2s ease;
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  line-height: 1.1;
 }
 .tg-btn::after {
   content:''; position: absolute; inset: 0;
@@ -326,7 +484,10 @@ const APP_CSS = `
 .tg-hints b { color: var(--accent); font-weight: 700; }
 
 /* ══ Graph area ══ */
-.tg-graph { flex: 1; position: relative; background: var(--graph-bg); transition: background 0.4s; }
+.tg-graph {
+  flex: 1; min-width: 0; min-height: 0;
+  position: relative; background: var(--graph-bg); transition: background 0.4s;
+}
 .tg-graph-grid {
   position: absolute; inset: 0; pointer-events: none; z-index: 0;
 }
@@ -384,7 +545,7 @@ const APP_CSS = `
 .tg-toast {
   display: flex; align-items: center; gap: 10px;
   padding: 14px 18px; border-radius: 13px;
-  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-family: 'Open Sans', sans-serif;
   font-size: 13.5px; font-weight: 700;
   backdrop-filter: blur(20px);
   box-shadow: 0 12px 36px rgba(0,0,0,0.3);
@@ -401,6 +562,30 @@ const APP_CSS = `
 .tg-t-error   { background: rgba(239,68,68,0.14);  border: 1px solid rgba(239,68,68,0.28);  color: #fca5a5; }
 .tg-t-info    { background: rgba(0,212,255,0.1);   border: 1px solid rgba(0,212,255,0.22);  color: #67e8f9; }
 .tg-t-warn    { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.25); color: #fcd34d; }
+.tgl .tg-toast {
+  background: rgba(255,255,255,0.94);
+  box-shadow: 0 18px 44px rgba(15,23,42,0.16);
+}
+.tgl .tg-t-success {
+  background: rgba(236,253,245,0.96);
+  border-color: rgba(5,150,105,0.24);
+  color: #047857;
+}
+.tgl .tg-t-error {
+  background: rgba(254,242,242,0.96);
+  border-color: rgba(220,38,38,0.24);
+  color: #b91c1c;
+}
+.tgl .tg-t-info {
+  background: rgba(239,246,255,0.96);
+  border-color: rgba(37,99,235,0.22);
+  color: #1d4ed8;
+}
+.tgl .tg-t-warn {
+  background: rgba(255,251,235,0.98);
+  border-color: rgba(217,119,6,0.24);
+  color: #b45309;
+}
 
 /* ══ MODAL ══ */
 .tg-modal-bd {
@@ -432,7 +617,7 @@ const APP_CSS = `
 }
 .tg-modal-icon  { font-size: 38px; margin-bottom: 14px; }
 .tg-modal-title {
-  font-family: 'Syne', sans-serif;
+  font-family: 'Open Sans', sans-serif;
   font-size: 20px; font-weight: 800;
   color: var(--text-1); margin-bottom: 10px; letter-spacing: -0.4px;
 }
@@ -441,7 +626,7 @@ const APP_CSS = `
 .tg-modal-btn {
   flex: 1; padding: 13px;
   border: none; border-radius: 11px;
-  font-family: 'Plus Jakarta Sans', sans-serif;
+  font-family: 'Open Sans', sans-serif;
   font-size: 14px; font-weight: 800;
   cursor: pointer; transition: all 0.2s;
 }
@@ -462,7 +647,18 @@ const APP_CSS = `
 .tg-m-blue:hover { box-shadow: 0 7px 26px rgba(0,212,255,0.44); }
 
 /* ReactFlow overrides */
-.react-flow__node { font-family: 'Plus Jakarta Sans', sans-serif !important; }
+.react-flow__node { font-family: 'Open Sans', sans-serif !important; }
+.react-flow__handle {
+  width: 10px !important; height: 10px !important;
+  background: var(--accent) !important;
+  border: 2px solid var(--panel-bg) !important;
+  box-shadow: 0 0 0 3px rgba(0,212,255,0.12) !important;
+}
+.tgl .react-flow__handle { box-shadow: 0 0 0 3px rgba(124,58,237,0.12) !important; }
+.react-flow__edge-path {
+  stroke-linecap: round !important;
+  stroke-linejoin: round !important;
+}
 .react-flow__controls { border-radius: 13px !important; overflow: hidden; }
 .tgd .react-flow__controls { background: rgba(7,15,40,0.92) !important; border: 1px solid rgba(0,212,255,0.12) !important; }
 .tgl .react-flow__controls { background: rgba(255,255,255,0.92) !important; border: 1px solid rgba(124,58,237,0.14) !important; }
@@ -472,6 +668,180 @@ const APP_CSS = `
 .tgl .react-flow__controls button:hover { background: rgba(124,58,237,0.06) !important; }
 .tgd .react-flow__minimap { background: rgba(5,13,31,0.92) !important; border: 1px solid rgba(0,212,255,0.1) !important; border-radius: 13px !important; }
 .tgl .react-flow__minimap { background: rgba(255,255,255,0.92) !important; border: 1px solid rgba(124,58,237,0.12) !important; border-radius: 13px !important; }
+
+/* ── Responsive dashboard ── */
+@media (max-width: 920px) {
+  .tg-shell {
+    flex-direction: column;
+    height: 100dvh;
+  }
+  .tg-panel {
+    width: 100%;
+    height: clamp(300px, 44dvh, 430px);
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 16px 44px rgba(15,23,42,0.08);
+  }
+  .tg-panel-head {
+    padding: 12px 14px;
+    gap: 10px;
+  }
+  .tg-head-actions {
+    gap: 10px;
+  }
+  .tg-user-pill {
+    margin: 10px 14px;
+  }
+  .tg-panel-body {
+    padding: 10px 14px 14px;
+    gap: 9px;
+  }
+  .tg-stats {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .tg-stat {
+    min-height: 58px;
+    padding: 10px 12px;
+  }
+  .tg-stat-val {
+    font-size: 21px;
+  }
+  .tg-section,
+  .tg-prog-card {
+    padding: 12px;
+  }
+  .tg-graph {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+  .tg-graph-legend {
+    top: 12px;
+    right: 12px;
+    width: min(250px, calc(100% - 24px));
+    padding: 11px;
+    border-radius: 14px;
+  }
+  .tg-graph-legend-title {
+    font-size: 11px;
+  }
+  .tg-graph-legend-item {
+    font-size: 11px;
+  }
+  .react-flow__minimap {
+    display: none !important;
+  }
+  .react-flow__controls {
+    left: 12px !important;
+    bottom: 12px !important;
+  }
+  .tg-toasts {
+    left: 12px;
+    right: 12px;
+    bottom: 12px;
+  }
+  .tg-toast {
+    min-width: 0;
+    max-width: none;
+  }
+  .tg-modal {
+    width: min(400px, calc(100% - 32px));
+  }
+}
+
+@media (max-width: 640px) {
+  .tg-shell {
+    font-size: 13px;
+  }
+  .tg-panel {
+    height: clamp(300px, 48dvh, 430px);
+  }
+  .tg-panel-head {
+    padding: 11px 12px;
+  }
+  .tg-brand-icon,
+  .tg-icon-btn {
+    width: 34px;
+    height: 34px;
+  }
+  .tg-icon-btn {
+    flex-basis: 34px;
+  }
+  .tg-logout-btn {
+    height: 34px;
+  }
+  .tg-brand-name {
+    font-size: 14px;
+  }
+  .tg-brand-tag {
+    font-size: 8px;
+    letter-spacing: 1px;
+  }
+  .tg-user-pill {
+    margin: 9px 12px;
+  }
+  .tg-panel-body {
+    padding: 9px 12px 12px;
+  }
+  .tg-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .tg-stat-label,
+  .tg-sec-label,
+  .tg-prog-label {
+    font-size: 8.5px;
+  }
+  .tg-input,
+  .tg-select,
+  .tg-btn {
+    min-height: 38px;
+    font-size: 12px;
+  }
+  .tg-hints {
+    font-size: 10.5px;
+  }
+  .tg-graph {
+    min-height: 0;
+  }
+  .tg-graph-legend {
+    left: 10px;
+    right: 10px;
+    top: 10px;
+    width: auto;
+  }
+  .tg-graph-legend-head {
+    margin-bottom: 8px;
+  }
+  .tg-graph-legend-items {
+    gap: 6px;
+  }
+  .tg-empty {
+    width: min(280px, calc(100% - 32px));
+  }
+  .tg-empty-icon {
+    font-size: 42px;
+  }
+  .tg-empty-t {
+    font-size: 15px;
+  }
+  .tg-empty-s {
+    font-size: 12px;
+  }
+  .tg-modal {
+    padding: 26px 22px;
+  }
+  .tg-modal-btns {
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 380px) {
+  .tg-graph-legend-total {
+    display: none;
+  }
+  .tg-graph-legend-item {
+    font-size: 10.5px;
+  }
+}
 `;
 
 /* ═══════════════════════════════════════════════════════
@@ -497,15 +867,51 @@ function isBlocked(id, edges, nodes) {
     const nd = nodes.find(n=>n.id===p); return nd && !nd.data.completed;
   });
 }
-const NW=165, NH=50;
+const NW=230, NH=68;
 function layoutNodes(nodes, edges) {
+  if (!nodes.length) return [];
+
+  const orderedNodes=[...nodes].sort((a,b)=>{
+    const na=Number(a.id), nb=Number(b.id);
+    if(Number.isFinite(na)&&Number.isFinite(nb)) return na-nb;
+    return String(a.id).localeCompare(String(b.id));
+  });
+  const nodeIds = new Set(orderedNodes.map(n=>n.id));
+  const validEdges = edges.filter(e=>nodeIds.has(e.source)&&nodeIds.has(e.target));
+  const withHandles = (n, position) => ({
+    ...n,
+    sourcePosition: Position.Bottom,
+    targetPosition: Position.Top,
+    position,
+  });
+
+  if (!validEdges.length) {
+    const cols = Math.max(1, Math.ceil(Math.sqrt(orderedNodes.length)));
+    const gapX = 56, gapY = 42;
+    return orderedNodes.map((n,i)=>withHandles(n,{
+      x:(i%cols)*(NW+gapX),
+      y:Math.floor(i/cols)*(NH+gapY),
+    }));
+  }
+
   const g = new dagre.graphlib.Graph();
   g.setDefaultEdgeLabel(()=>({}));
-  g.setGraph({ rankdir:"LR", ranksep:95, nodesep:60 });
-  nodes.forEach(n=>g.setNode(n.id,{width:NW,height:NH}));
-  edges.forEach(e=>g.setEdge(e.source,e.target));
+  g.setGraph({
+    rankdir:"TB",
+    ranker:"tight-tree",
+    ranksep:110,
+    nodesep:80,
+    marginx:80,
+    marginy:70,
+  });
+  orderedNodes.forEach(n=>g.setNode(n.id,{width:NW,height:NH}));
+  validEdges.forEach(e=>g.setEdge(e.source,e.target));
   dagre.layout(g);
-  return nodes.map(n=>{ const p=g.node(n.id); return {...n,position:{x:p.x-NW/2,y:p.y-NH/2}}; });
+  return orderedNodes.map((n,i)=>{
+    const p=g.node(n.id);
+    const fallback={x:(i%4)*(NW+60),y:Math.floor(i/4)*(NH+70)};
+    return withHandles(n,p ? {x:p.x-NW/2,y:p.y-NH/2} : fallback);
+  });
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -600,6 +1006,14 @@ export default function App() {
   const {toasts,show:toast,dismiss} = useToast();
   const clickTimer = useRef(null);
   const mResolve   = useRef(null);
+  const flowRef    = useRef(null);
+  const graphRef   = useRef(null);
+
+  const fitGraph = useCallback((duration=450)=>{
+    if(!flowRef.current) return;
+    const compact = typeof window !== "undefined" && window.innerWidth < 700;
+    flowRef.current.fitView({padding:compact?0.16:0.28,duration});
+  },[]);
 
   // Inject CSS
   useEffect(()=>{
@@ -636,7 +1050,27 @@ export default function App() {
     return()=>{u1();u2();};
   },[user]);
 
-  useEffect(()=>{ setNodes(prev=>layoutNodes(prev,edges)); },[edges]);
+  useEffect(()=>{
+    if(!flowRef.current||nodes.length===0) return;
+    const id=setTimeout(()=>fitGraph(), 80);
+    return()=>clearTimeout(id);
+  },[nodes.length,edges.length,search,fitGraph]);
+
+  useEffect(()=>{
+    if(!graphRef.current) return;
+    let frame;
+    if(typeof ResizeObserver==="undefined"){
+      const onResize=()=>fitGraph(250);
+      window.addEventListener("resize",onResize);
+      return()=>window.removeEventListener("resize",onResize);
+    }
+    const ro=new ResizeObserver(()=>{
+      cancelAnimationFrame(frame);
+      frame=requestAnimationFrame(()=>fitGraph(250));
+    });
+    ro.observe(graphRef.current);
+    return()=>{cancelAnimationFrame(frame);ro.disconnect();};
+  },[fitGraph]);
 
   // CRUD
   const deleteNode=async(nodeId,label)=>{
@@ -741,34 +1175,69 @@ export default function App() {
   const blocked=nodes.filter(n=>!n.data.completed&&isBlocked(n.id,edges,nodes)).length;
   const ready=nodes.filter(n=>!n.data.completed&&!isBlocked(n.id,edges,nodes)).length;
   const pct=total>0?Math.round((done/total)*100):0;
+  const statusColors={
+    complete: dark?"#10b981":"#059669",
+    pending:  dark?"#f59e0b":"#d97706",
+    blocked:  dark?"#ef4444":"#dc2626",
+  };
+  const statusLegend=[
+    {
+      key:"complete",
+      label:"Completed",
+      count:done,
+      className:"tg-status-complete",
+    },
+    {
+      key:"pending",
+      label:"Pending / Ready",
+      count:ready,
+      className:"tg-status-pending",
+    },
+    {
+      key:"blocked",
+      label:"Blocked",
+      count:blocked,
+      className:"tg-status-blocked",
+    },
+  ];
+  const taskOptions=[...nodes].sort((a,b)=>
+    a.data.label.localeCompare(b.data.label, undefined, {sensitivity:"base", numeric:true})
+  );
+  const selectedParent=nodes.find(n=>n.id===parent);
+  const selectedChild=nodes.find(n=>n.id===child);
 
   // Styled nodes
-  const styledNodes=nodes
+  const styledNodes=layoutNodes(nodes,edges)
     .filter(n=>n.data.label.toLowerCase().includes(search.toLowerCase()))
     .map(n=>{
       const d=n.data.completed, b=isBlocked(n.id,edges,nodes);
       const match=search&&n.data.label.toLowerCase().includes(search.toLowerCase());
       let bg,border,color,shadow;
       if(d){
-        bg="rgba(0,212,255,0.1)";border="1.5px solid rgba(0,212,255,0.5)";
-        color=dark?"#67e8f9":"#0e7490";shadow="0 0 18px rgba(0,212,255,0.2)";
+        bg="var(--status-complete-bg)";
+        border="1.5px solid var(--status-complete)";
+        color="var(--status-complete)";shadow="0 16px 40px rgba(16,185,129,0.18)";
       } else if(b){
-        bg="rgba(239,68,68,0.1)";border="1.5px solid rgba(239,68,68,0.45)";
-        color=dark?"#fca5a5":"#b91c1c";shadow="0 0 14px rgba(239,68,68,0.14)";
+        bg="var(--status-blocked-bg)";
+        border="1.5px solid var(--status-blocked)";
+        color="var(--status-blocked)";shadow="0 16px 36px rgba(239,68,68,0.14)";
       } else {
-        bg="rgba(16,185,129,0.1)";border="1.5px solid rgba(16,185,129,0.45)";
-        color=dark?"#6ee7b7":"#065f46";shadow="0 0 16px rgba(16,185,129,0.16)";
+        bg="var(--status-pending-bg)";
+        border="1.5px solid var(--status-pending)";
+        color="var(--status-pending)";shadow="0 16px 38px rgba(245,158,11,0.16)";
       }
       if(match) border="2px solid #facc15";
       return {...n,
-        title:d?"Completed":b?"Blocked — waiting on a dependency":"Ready to work",
+        title:d?"Completed":b?"Blocked — waiting on a dependency":"Pending — ready to work",
         style:{
           background:bg,border,color,borderRadius:"12px",
-          padding:"11px 18px",
-          fontFamily:"'Plus Jakarta Sans',sans-serif",
-          fontSize:"13px",fontWeight:"700",
+          padding:"14px 22px",
+          fontFamily:"'Open Sans',sans-serif",
+          fontSize:"15px",fontWeight:"800",lineHeight:"1.3",
           boxShadow:shadow,backdropFilter:"blur(6px)",
-          cursor:"pointer",transition:"all 0.25s ease",minWidth:"120px",
+          cursor:"pointer",transition:"all 0.25s ease",width:`${NW}px`,minHeight:`${NH}px`,
+          display:"flex",alignItems:"center",justifyContent:"center",textAlign:"center",
+          letterSpacing:"-0.2px",
         }
       };
     });
@@ -823,10 +1292,10 @@ export default function App() {
           {/* Stats */}
           <div className="tg-stats">
             {[
-              {label:"Total",    val:total,   color:"var(--text-1)"},
-              {label:"Links",    val:edges.length, color:"var(--text-2)"},
-              {label:"Complete", val:done,    color:"var(--accent)"},
-              {label:"Ready",    val:ready,   color:"#10b981"},
+              {label:"Total",     val:total,   color:"var(--text-1)"},
+              {label:"Complete",  val:done,    color:"var(--status-complete)"},
+              {label:"Pending",   val:ready,   color:"var(--status-pending)"},
+              {label:"Blocked",   val:blocked, color:"var(--status-blocked)"},
             ].map((s,i)=>(
               <div className="tg-stat" key={s.label} style={{animationDelay:`${i*0.05+0.1}s`}}>
                 <div className="tg-stat-label">{s.label}</div>
@@ -849,14 +1318,6 @@ export default function App() {
             </div>
           )}
 
-          {/* Legend */}
-          <div className="tg-section">
-            <div className="tg-sec-label">Status Key</div>
-            <div className="tg-legend-row"><div className="tg-dot" style={{background:"#10b981"}}/>Ready to work</div>
-            <div className="tg-legend-row"><div className="tg-dot" style={{background:"var(--accent)"}}/>Completed</div>
-            <div className="tg-legend-row"><div className="tg-dot" style={{background:"#ef4444"}}/>Blocked</div>
-          </div>
-
           {/* Search */}
           <div className="tg-section">
             <div className="tg-sec-label">Search</div>
@@ -878,14 +1339,44 @@ export default function App() {
           {/* Add Dependency */}
           <div className="tg-section">
             <div className="tg-sec-label">Link Dependency</div>
-            <select className="tg-select" value={parent} onChange={e=>setParent(e.target.value)}>
-              <option value="">↳ Parent (must finish first)</option>
-              {nodes.map(n=><option key={n.id} value={n.id}>{n.data.label}</option>)}
-            </select>
-            <select className="tg-select" value={child} onChange={e=>setChild(e.target.value)}>
-              <option value="">↳ Child (waits for parent)</option>
-              {nodes.map(n=><option key={n.id} value={n.id}>{n.data.label}</option>)}
-            </select>
+            <div className="tg-field-stack">
+              <label className="tg-field-label" htmlFor="tg-parent-select">
+                Parent task
+                <span className="tg-field-hint">Finishes first</span>
+              </label>
+              <div className="tg-select-wrap">
+                <select id="tg-parent-select" className="tg-select" value={parent} onChange={e=>setParent(e.target.value)}>
+                  <option value="">Select parent task...</option>
+                  {taskOptions.map(n=><option key={n.id} value={n.id}>{n.data.label}</option>)}
+                </select>
+              </div>
+            </div>
+            <div className="tg-field-stack">
+              <label className="tg-field-label" htmlFor="tg-child-select">
+                Child task
+                <span className="tg-field-hint">Waits for parent</span>
+              </label>
+              <div className="tg-select-wrap">
+                <select id="tg-child-select" className="tg-select" value={child} onChange={e=>setChild(e.target.value)}>
+                  <option value="">Select child task...</option>
+                  {taskOptions.map(n=><option key={n.id} value={n.id}>{n.data.label}</option>)}
+                </select>
+              </div>
+            </div>
+            {(selectedParent||selectedChild)&&(
+              <div className="tg-select-meta">
+                <span>Flow:</span>
+                <strong>{selectedParent?.data.label||"Parent"}</strong>
+                <span>→</span>
+                <strong>{selectedChild?.data.label||"Child"}</strong>
+              </div>
+            )}
+            {parent&&child&&parent===child&&(
+              <div className="tg-select-meta">
+                <span>⚠</span>
+                <strong>Choose two different tasks to create a dependency.</strong>
+              </div>
+            )}
             <button className="tg-btn tg-btn-primary" onClick={addDep}
               disabled={!parent||!child||parent===child}>
               Link Tasks →
@@ -908,9 +1399,24 @@ export default function App() {
       </div>
 
       {/* ══ GRAPH ══ */}
-      <div className="tg-graph">
+      <div className="tg-graph" ref={graphRef}>
         <div className="tg-graph-grid"/>
         <BgCanvas dark={dark}/>
+        <div className="tg-graph-legend" aria-label="Task status color key">
+          <div className="tg-graph-legend-head">
+            <div className="tg-graph-legend-title">Task Status</div>
+            <div className="tg-graph-legend-total">{total} total</div>
+          </div>
+          <div className="tg-graph-legend-items">
+            {statusLegend.map(s=>(
+              <div className={`tg-graph-legend-item ${s.className}`} key={s.key}>
+                <span className="tg-dot"/>
+                <span>{s.label}</span>
+                <span className="tg-graph-legend-count">{s.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
         {nodes.length===0&&(
           <div className="tg-empty">
             <div className="tg-empty-icon">◈</div>
@@ -926,11 +1432,15 @@ export default function App() {
           }))}
           onNodeClick={onNodeClick}
           onEdgeClick={onEdgeClick}
-          fitView fitViewOptions={{padding:0.3}}
+          onInit={instance=>{flowRef.current=instance;setTimeout(()=>fitGraph(350),0);}}
+          fitView fitViewOptions={{padding:0.28}}
+          minZoom={0.2}
+          maxZoom={1.5}
+          onlyRenderVisibleElements
           proOptions={{hideAttribution:true}}
         >
           <MiniMap
-            nodeColor={n=>n.data?.completed?"#00d4ff":isBlocked(n.id,edges,nodes)?"#ef4444":"#10b981"}
+            nodeColor={n=>n.data?.completed?statusColors.complete:isBlocked(n.id,edges,nodes)?statusColors.blocked:statusColors.pending}
             maskColor={dark?"rgba(3,11,26,0.65)":"rgba(238,242,255,0.65)"}
           />
           <Controls/>
