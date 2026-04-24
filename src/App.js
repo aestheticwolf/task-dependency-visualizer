@@ -7,6 +7,15 @@ import { onAuthStateChanged, signOut } from "firebase/auth";
 import Login from "./Login";
 import Landing from "./Landing";
 import {
+  buildGraph,
+  formatBlockedTaskMessage,
+  formatUnlinkedTaskMessage,
+  getBlockingTasks,
+  hasCycle,
+  hasLinkedDependency,
+  isBlocked,
+} from "./taskLogic";
+import {
   collection, addDoc, getDocs, deleteDoc,
   doc, onSnapshot, updateDoc,
 } from "firebase/firestore";
@@ -844,29 +853,6 @@ button, input, select, textarea {
 }
 `;
 
-/* ═══════════════════════════════════════════════════════
-   HELPERS
-═══════════════════════════════════════════════════════ */
-function buildGraph(edges) {
-  const g = {};
-  edges.forEach(e => { if (!g[e.source]) g[e.source] = []; g[e.source].push(e.target); });
-  return g;
-}
-function hasCycle(graph) {
-  const v = new Set(), s = new Set();
-  function dfs(n) {
-    if (s.has(n)) return true; if (v.has(n)) return false;
-    v.add(n); s.add(n);
-    for (const c of (graph[n]||[])) if (dfs(c)) return true;
-    s.delete(n); return false;
-  }
-  return Object.keys(graph).some(dfs);
-}
-function isBlocked(id, edges, nodes) {
-  return edges.filter(e=>e.target===id).map(e=>e.source).some(p=>{
-    const nd = nodes.find(n=>n.id===p); return nd && !nd.data.completed;
-  });
-}
 const NW=230, NH=68;
 function layoutNodes(nodes, edges) {
   if (!nodes.length) return [];
@@ -1125,8 +1111,20 @@ export default function App() {
         const d=ns.docs.find(x=>x.data().id===node.id);
         if(d){
           const was=d.data().data.completed;
+          const linked=hasLinkedDependency(node.id,edges);
+          if(!was&&!linked){
+            toast(formatUnlinkedTaskMessage(node.data.label),"warn");
+            clickTimer.current=null;
+            return;
+          }
+          const blockers=getBlockingTasks(node.id,edges,nodes);
+          if(!was&&blockers.length){
+            toast(formatBlockedTaskMessage(blockers),"warn");
+            clickTimer.current=null;
+            return;
+          }
           await updateDoc(doc(db,"users",user.uid,"nodes",d.id),{"data.completed":!was});
-          toast(was?"Marked as pending":"Completed ✓",was?"info":"success");
+          toast(was?"Marked as pending":"Completed",was?"info":"success");
         }
         clickTimer.current=null;
       },260);
@@ -1210,7 +1208,7 @@ export default function App() {
   const styledNodes=layoutNodes(nodes,edges)
     .filter(n=>n.data.label.toLowerCase().includes(search.toLowerCase()))
     .map(n=>{
-      const d=n.data.completed, b=isBlocked(n.id,edges,nodes);
+      const d=n.data.completed, b=isBlocked(n.id,edges,nodes), linked=hasLinkedDependency(n.id,edges);
       const match=search&&n.data.label.toLowerCase().includes(search.toLowerCase());
       let bg,border,color,shadow;
       if(d){
@@ -1228,7 +1226,7 @@ export default function App() {
       }
       if(match) border="2px solid #facc15";
       return {...n,
-        title:d?"Completed":b?"Blocked — waiting on a dependency":"Pending — ready to work",
+        title:d?"Completed":!linked?"Link a dependency before marking this task complete":b?"Blocked — waiting on a dependency":"Pending — ready to work",
         style:{
           background:bg,border,color,borderRadius:"12px",
           padding:"14px 22px",
