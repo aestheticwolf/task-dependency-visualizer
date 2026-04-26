@@ -67,6 +67,7 @@ const LANDING_CSS = `
   display: flex; align-items: center; justify-content: center;
   font-size: 17px;
   box-shadow: 0 0 18px rgba(0,212,255,0.3);
+  position: relative; overflow: hidden;
 }
 .ld-nav-brand {
   font-family: 'Open Sans', sans-serif;
@@ -903,6 +904,24 @@ const LANDING_CSS = `
     transition-duration: 0.01ms !important;
   }
 }
+
+
+/* ── Animated logo SVG ── */
+@keyframes tlg-draw {
+  0%   { stroke-dashoffset: 22; opacity: 0; }
+  18%  { opacity: 1; }
+  65%  { stroke-dashoffset: 0; opacity: 1; }
+  100% { stroke-dashoffset: -22; opacity: 0; }
+}
+.ld-nav-icon { overflow: hidden; position: relative; }
+.tlg-edge {
+  stroke-dasharray: 22;
+  stroke-dashoffset: 22;
+  animation: tlg-draw 2.8s ease-in-out infinite;
+}
+.tlg-e2 { animation-delay: 0.7s; }
+.tlg-e3 { animation-delay: 1.4s; }
+.tlg-e4 { animation-delay: 2.1s; }
 `;
 
 /* ── Particle canvas ── */
@@ -1012,7 +1031,18 @@ export default function Landing({ onGetStarted }) {
       {/* NAV */}
       <nav className="ld-nav">
         <div className="ld-nav-logo">
-          <div className="ld-nav-icon">⬡</div>
+          <div className="ld-nav-icon">
+  <svg width="100%" height="100%" viewBox="0 0 36 36" fill="none" style={{position:'absolute',inset:0}}>
+    <line className="tlg-edge"      x1="8"  y1="11" x2="18" y2="7"  stroke="rgba(255,255,255,0.45)" strokeWidth="1.3" strokeLinecap="round"/>
+    <line className="tlg-edge tlg-e2" x1="18" y1="7"  x2="28" y2="14" stroke="rgba(255,255,255,0.45)" strokeWidth="1.3" strokeLinecap="round"/>
+    <line className="tlg-edge tlg-e3" x1="28" y1="14" x2="18" y2="27" stroke="rgba(255,255,255,0.45)" strokeWidth="1.3" strokeLinecap="round"/>
+    <line className="tlg-edge tlg-e4" x1="8"  y1="11" x2="18" y2="27" stroke="rgba(255,255,255,0.45)" strokeWidth="1.3" strokeLinecap="round"/>
+    <circle cx="8"  cy="11" r="2.2" fill="white" opacity="0.9"/>
+    <circle cx="18" cy="7"  r="2.2" fill="white" opacity="0.9"/>
+    <circle cx="28" cy="14" r="2.2" fill="white" opacity="0.9"/>
+    <circle cx="18" cy="27" r="2.8" fill="white" opacity="0.9"/>
+  </svg>
+</div>
           <span className="ld-nav-brand">TaskGraph</span>
         </div>
         <div className="ld-nav-cta">
@@ -1034,7 +1064,7 @@ export default function Landing({ onGetStarted }) {
         <div className="ld-hero-inner">
           <div className="ld-hero-badge">
             <div className="ld-hero-badge-dot" />
-            Internship Project · Task Dependency Visualizer
+            TaskGraph · Visual Workflow Intelligence
           </div>
 
           <h1 className="ld-hero-title">
@@ -1160,7 +1190,18 @@ export default function Landing({ onGetStarted }) {
       {/* FOOTER */}
       <footer className="ld-footer">
         <div className="ld-footer-logo">
-          <div style={{ width:26,height:26,borderRadius:7,background:"linear-gradient(135deg,#00d4ff,#7c3aed)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13 }}>⬡</div>
+          <div style={{width:26,height:26,borderRadius:7,background:"linear-gradient(135deg,#00d4ff,#7c3aed)",display:"flex",alignItems:"center",justifyContent:"center",overflow:"hidden",position:"relative",flexShrink:0}}>
+  <svg width="100%" height="100%" viewBox="0 0 26 26" fill="none" style={{position:'absolute',inset:0}}>
+    <line x1="6" y1="8" x2="13" y2="5" stroke="rgba(255,255,255,0.5)" strokeWidth="1.2" strokeLinecap="round"/>
+    <line x1="13" y1="5" x2="20" y2="10" stroke="rgba(255,255,255,0.5)" strokeWidth="1.2" strokeLinecap="round"/>
+    <line x1="20" y1="10" x2="13" y2="20" stroke="rgba(255,255,255,0.5)" strokeWidth="1.2" strokeLinecap="round"/>
+    <line x1="6" y1="8" x2="13" y2="20" stroke="rgba(255,255,255,0.5)" strokeWidth="1.2" strokeLinecap="round"/>
+    <circle cx="6" cy="8" r="1.8" fill="white"/>
+    <circle cx="13" cy="5" r="1.8" fill="white"/>
+    <circle cx="20" cy="10" r="1.8" fill="white"/>
+    <circle cx="13" cy="20" r="2.2" fill="white"/>
+  </svg>
+</div>
           TaskGraph
         </div>
         <div className="ld-footer-copy">Built for internship · Task Dependency Visualizer</div>

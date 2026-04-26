@@ -615,6 +615,14 @@ const CSS = `
   .auth-tab, .auth-input, .auth-btn { font-size: 13px; }
   .auth-input { padding: 13px 44px 13px 44px; }
 }
+/* ── Animated logo SVG ── */
+@keyframes tlg-draw {
+  0%   { stroke-dashoffset: 28; opacity: 0; }
+  18%  { opacity: 1; }
+  65%  { stroke-dashoffset: 0; opacity: 1; }
+  100% { stroke-dashoffset: -28; opacity: 0; }
+}
+
 `;
 
 /* ══════════════════════════════════════════════
@@ -805,7 +813,26 @@ export default function Login({ setUser, onBack }) {
 
           {/* Logo */}
           <div className="auth-logo-row">
-            <div className="auth-logo-icon">⬡</div>
+            <div className="auth-logo-icon" style={{overflow:'hidden'}}>
+  <svg width="100%" height="100%" viewBox="0 0 52 52" fill="none" style={{position:'absolute',inset:0}}>
+    {[
+      {x1:13,y1:17,x2:26,y2:12,d:0},
+      {x1:26,y1:12,x2:39,y2:21,d:0.7},
+      {x1:39,y1:21,x2:26,y2:40,d:1.4},
+      {x1:13,y1:17,x2:26,y2:40,d:2.1},
+    ].map((l,i)=>(
+      <line key={i} x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2}
+        stroke="rgba(255,255,255,0.45)" strokeWidth="1.5" strokeLinecap="round"
+        style={{strokeDasharray:28,strokeDashoffset:28,
+          animation:`tlg-draw 2.8s ease-in-out ${l.d}s infinite`}}/>
+    ))}
+    {[{cx:13,cy:17,r:3},{cx:26,cy:12,r:3},{cx:39,cy:21,r:3},{cx:26,cy:40,r:3.8}].map((c,i)=>(
+      <circle key={i} cx={c.cx} cy={c.cy} r={c.r} fill="white"
+        style={{animation:`tlg-draw 2.8s ease-in-out ${i*0.5}s infinite`,
+          strokeDasharray:'none',strokeDashoffset:0,opacity:0.9}}/>
+    ))}
+  </svg>
+</div>
             <div>
               <div className="auth-logo-name">TaskGraph</div>
               <div className="auth-logo-sub">Dependency Visualizer</div>

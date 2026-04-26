@@ -125,6 +125,7 @@ button, input, select, textarea {
   background: linear-gradient(135deg, #00d4ff, #7c3aed);
   display: flex; align-items: center; justify-content: center;
   font-size: 18px; flex-shrink: 0;
+  position: relative; overflow: hidden;
   animation: tg-glow 3s ease-in-out infinite;
 }
 @keyframes tg-glow {
@@ -851,6 +852,17 @@ button, input, select, textarea {
     font-size: 10.5px;
   }
 }
+
+/* ── Animated logo SVG ── */
+@keyframes tlg-draw {
+  0%   { stroke-dashoffset: 22; opacity: 0; }
+  18%  { opacity: 1; }
+  65%  { stroke-dashoffset: 0; opacity: 1; }
+  100% { stroke-dashoffset: -22; opacity: 0; }
+}
+.tg-brand-icon { overflow: hidden; }
+
+
 `;
 
 const NW=230, NH=68;
@@ -1258,7 +1270,24 @@ export default function App() {
         {/* Header */}
         <div className="tg-panel-head">
           <div className="tg-brand-row">
-            <div className="tg-brand-icon">⬡</div>
+            <div className="tg-brand-icon">
+  <svg width="100%" height="100%" viewBox="0 0 36 36" fill="none" style={{position:'absolute',inset:0}}>
+    {[
+      {x1:8,y1:11,x2:18,y2:7,d:0},
+      {x1:18,y1:7,x2:28,y2:14,d:0.7},
+      {x1:28,y1:14,x2:18,y2:27,d:1.4},
+      {x1:8,y1:11,x2:18,y2:27,d:2.1},
+    ].map((l,i)=>(
+      <line key={i} x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2}
+        stroke="rgba(255,255,255,0.45)" strokeWidth="1.3" strokeLinecap="round"
+        style={{strokeDasharray:22,strokeDashoffset:22,
+          animation:`tlg-draw 2.8s ease-in-out ${l.d}s infinite`}}/>
+    ))}
+    {[{cx:8,cy:11,r:2.2},{cx:18,cy:7,r:2.2},{cx:28,cy:14,r:2.2},{cx:18,cy:27,r:2.8}].map((c,i)=>(
+      <circle key={i} cx={c.cx} cy={c.cy} r={c.r} fill="white" opacity="0.9"/>
+    ))}
+  </svg>
+</div>
             <div>
               <div className="tg-brand-name">TaskGraph</div>
               <div className="tg-brand-tag">Dependency Visualizer</div>
