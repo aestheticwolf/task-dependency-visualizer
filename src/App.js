@@ -996,6 +996,8 @@ export default function App() {
   const [taskName, setTaskName] = useState("");
   const [parent,   setParent]   = useState("");
   const [child,    setChild]    = useState("");
+  const [editTaskId, setEditTaskId] = useState("");
+const [editTaskName, setEditTaskName] = useState("");
   const [modal,    setModal]    = useState(null);
   const [dark,     setDark]     = useState(()=>{
     try{return localStorage.getItem("tg-dark")!=="false";}catch{return true;}
@@ -1022,6 +1024,15 @@ export default function App() {
   },[]);
 
   useEffect(()=>{ try{localStorage.setItem("tg-dark",dark);}catch{} },[dark]);
+
+
+    // Sync edit input when a task is selected for editing
+  useEffect(() => {
+    if (editTaskId) {
+      const node = nodes.find(n => n.id === editTaskId);
+      if (node) setEditTaskName(node.data.label);
+    }
+  }, [editTaskId, nodes]);
 
   // Confirm helper
   const confirm=(opts)=>new Promise(resolve=>{
@@ -1097,6 +1108,35 @@ export default function App() {
     });
     toast(`"${taskName.trim()}" added`,"success");
     setTaskName("");
+  };
+
+
+    const editTask = async () => {
+    if (!editTaskId || !editTaskName.trim()) return;
+    
+    // Check if name actually changed
+    const originalNode = nodes.find(n => n.id === editTaskId);
+    if (originalNode && editTaskName.trim() === originalNode.data.label) {
+      setEditTaskId("");
+      setEditTaskName("");
+      return;
+    }
+    
+    try {
+      const ns = await getDocs(collection(db, "users", user.uid, "nodes"));
+      const d = ns.docs.find(x => x.data().id === editTaskId);
+      if (d) {
+        await updateDoc(doc(db, "users", user.uid, "nodes", d.id), {
+          "data.label": editTaskName.trim()
+        });
+        toast(`"${editTaskName.trim()}" updated`, "success");
+      }
+    } catch (err) {
+      console.error("Edit error:", err);
+      toast("Failed to update task", "error");
+    }
+    setEditTaskId("");
+    setEditTaskName("");
   };
 
   const addDep=async()=>{
@@ -1410,11 +1450,73 @@ export default function App() {
             </button>
           </div>
 
-          {/* Hints */}
+
+                    {/* Edit Task */}
+          <div className="tg-section">
+            <div className="tg-sec-label">Edit Task</div>
+            <div className="tg-field-stack">
+              <label className="tg-field-label" htmlFor="tg-edit-select">
+                Select task
+                <span className="tg-field-hint">Choose to rename</span>
+              </label>
+              <div className="tg-select-wrap">
+                <select 
+                  id="tg-edit-select" 
+                  className="tg-select" 
+                  value={editTaskId} 
+                  onChange={e => setEditTaskId(e.target.value)}
+                >
+                  <option value="">Select a task to edit...</option>
+                  {taskOptions.map(n => (
+                    <option key={n.id} value={n.id}>{n.data.label}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {editTaskId && (
+              <>
+                <input 
+                  className="tg-input" 
+                  type="text" 
+                  placeholder="New task name…"
+                  value={editTaskName}
+                  onChange={e => setEditTaskName(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && editTask()}
+                />
+                <div style={{ display: "flex", gap: "8px" }}>
+                  <button 
+                    className="tg-btn tg-btn-primary" 
+                    onClick={editTask}
+                    disabled={!editTaskName.trim()}
+                    style={{ flex: 1 }}
+                  >
+                    💾 Save
+                  </button>
+                  <button 
+                    className="tg-btn" 
+                    style={{ 
+                      background: "var(--card)", 
+                      border: "1px solid var(--border)",
+                      color: "var(--text-2)",
+                      flex: "0 0 40px",
+                      padding: "11px"
+                    }}
+                    onClick={() => { setEditTaskId(""); setEditTaskName(""); }}
+                    title="Cancel"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+
+                  {/* Hints */}
           <div className="tg-hints">
             <b>Click</b> node → toggle complete<br/>
             <b>Double-click</b> node → delete task<br/>
-            <b>Click edge</b> → remove link
+            <b>Click edge</b> → remove link<br/>
+            <b>Use panel</b> → edit task name
           </div>
 
           {/* Reset */}
