@@ -787,18 +787,24 @@ const LANDING_CSS = `
   .ld-nav {
     align-items: flex-start;
     flex-direction: column;
+    padding: 10px 14px 12px;
+    gap: 10px;
   }
 
   .ld-nav-cta {
     width: 100%;
     display: grid;
-    grid-template-columns: auto 1fr 1fr;
+    grid-template-columns: 38px 1fr 1fr;
+    gap: 8px;
   }
 
   .ld-btn-ghost,
   .ld-btn-solid {
     width: 100%;
     min-width: 0;
+    min-height: 42px;
+    padding: 11px 14px;
+    font-size: 13px;
   }
 
   .ld-theme-toggle {
@@ -808,16 +814,26 @@ const LANDING_CSS = `
   }
 
   .ld-hero {
-    padding-top: 150px;
+    padding-top: 132px;
+    padding-bottom: 52px;
+  }
+
+  .ld-hero-badge {
+    margin-bottom: 16px;
+    padding: 6px 12px;
+    font-size: 11px;
   }
 
   .ld-hero-title {
-    font-size: clamp(34px, 12vw, 46px);
+    font-size: clamp(30px, 11vw, 42px);
     letter-spacing: -0.8px;
+    margin-bottom: 16px;
   }
 
   .ld-hero-sub {
-    font-size: 15px;
+    font-size: 14px;
+    line-height: 1.65;
+    margin-bottom: 24px;
   }
 
   .ld-cta-primary,
@@ -827,13 +843,29 @@ const LANDING_CSS = `
     padding: 14px 22px;
   }
 
+  .ld-hero-btns {
+    gap: 10px;
+  }
+
+  .ld-preview {
+    margin-top: 28px;
+  }
+
   .ld-preview-frame {
     border-radius: 16px;
+    padding: 16px 14px;
+  }
+
+  .ld-preview-bar {
+    margin-bottom: 16px;
   }
 
   .ld-graph-demo {
     align-items: stretch;
     flex-direction: column;
+    gap: 8px;
+    padding: 18px 4px 12px;
+    min-height: 0;
   }
 
   .ld-arrow {
@@ -844,11 +876,14 @@ const LANDING_CSS = `
 
   .ld-node {
     width: 100%;
+    min-width: 0;
+    padding: 11px 14px;
+    font-size: 12px;
   }
 
   .ld-stats-bar {
     grid-template-columns: 1fr;
-    width: min(100% - 32px, 420px);
+    width: min(100% - 24px, 420px);
   }
 
   .ld-stat-item + .ld-stat-item::before {
@@ -860,24 +895,28 @@ const LANDING_CSS = `
   }
 
   .ld-section {
-    padding-top: 72px;
-    padding-bottom: 72px;
+    padding-top: 60px;
+    padding-bottom: 60px;
   }
 
   .ld-footer {
     justify-content: center;
     text-align: center;
   }
+
+  .ld-cta-card {
+    border-radius: 22px;
+  }
 }
 
 @media (max-width: 420px) {
   .ld-nav {
-    padding-left: 14px;
-    padding-right: 14px;
+    padding-left: 12px;
+    padding-right: 12px;
   }
 
   .ld-nav-brand {
-    font-size: 16px;
+    font-size: 15px;
   }
 
   .ld-nav-cta {
@@ -889,8 +928,8 @@ const LANDING_CSS = `
   }
 
   .ld-hero {
-    padding-left: 14px;
-    padding-right: 14px;
+    padding-left: 12px;
+    padding-right: 12px;
   }
 }
 
@@ -1006,10 +1045,9 @@ const HOW_STEPS = [
   { n:"4", title:"Track Progress", desc:"Click tasks to complete them. Watch blocked tasks automatically unlock as dependencies clear." },
 ];
 
-export default function Landing({ onGetStarted }) {
-  const [dark, setDark] = useState(() => {
-    try { return localStorage.getItem("tg-dark") !== "false"; } catch { return true; }
-  });
+export default function Landing({ onGetStarted, onSignIn, darkTheme, setDarkTheme }) {
+  const dark = Boolean(darkTheme);
+  const setDark = setDarkTheme;
 
   useEffect(() => {
     const existing = document.getElementById("ld-css");
@@ -1021,10 +1059,6 @@ export default function Landing({ onGetStarted }) {
       document.head.appendChild(s);
     }
   }, []);
-
-  useEffect(() => {
-    try { localStorage.setItem("tg-dark", dark); } catch {}
-  }, [dark]);
 
   return (
     <div className={`ld-root ${dark ? "dark" : "light"}`}>
@@ -1049,7 +1083,7 @@ export default function Landing({ onGetStarted }) {
           <button className="ld-theme-toggle" onClick={() => setDark(d => !d)} title="Toggle theme" aria-label="Toggle theme">
             {dark ? "☀️" : "🌙"}
           </button>
-          <button className="ld-btn-ghost" onClick={onGetStarted}>Sign In</button>
+          <button className="ld-btn-ghost" onClick={onSignIn || onGetStarted}>Sign In</button>
           <button className="ld-btn-solid" onClick={onGetStarted}>Get Started Free →</button>
         </div>
       </nav>

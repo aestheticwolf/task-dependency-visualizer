@@ -1,9 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { auth } from "./firebase";
-import {
-  signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
-} from "firebase/auth";
+import { signInWithEmailAndPassword } from "firebase/auth";
 
 /* ═══════════════════════════════════════════════════════
    CSS
@@ -595,25 +592,35 @@ const CSS = `
   .auth-root {
     align-items: flex-start; justify-content: center;
     min-height: 100dvh; overflow-y: auto;
-    padding: 92px 18px 34px;
+    padding: 78px 14px 24px;
   }
-  .auth-back-btn { top: 16px; left: 16px; padding: 9px 14px; font-size: 12px; }
-  .auth-theme-btn { top: 16px; right: 16px; width: 42px; height: 42px; font-size: 18px; }
-  .auth-card-wrap { width: min(100%, 460px); }
-  .auth-card { width: 100%; padding: 38px 28px; }
-  .auth-logo-row { margin-bottom: 28px; }
+  .auth-back-btn { top: 14px; left: 14px; padding: 8px 12px; font-size: 12px; border-radius: 10px; }
+  .auth-theme-btn { top: 14px; right: 14px; width: 40px; height: 40px; font-size: 17px; }
+  .auth-card-wrap { width: min(100%, 392px); border-radius: 24px; }
+  .auth-card { width: 100%; padding: 30px 20px; border-radius: 21px; }
+  .auth-logo-row { margin-bottom: 22px; gap: 12px; }
+  .auth-tabs { margin-bottom: 20px; }
+  .auth-tab { padding: 10px 6px; font-size: 13px; }
+  .auth-fields { gap: 12px; margin-bottom: 20px; }
+  .auth-err { padding: 12px 14px; font-size: 12.5px; margin-bottom: 16px; }
+  .auth-footer { font-size: 12px; text-align: center; }
+  .auth-orb-1 { width: 360px; height: 360px; filter: blur(76px); }
+  .auth-orb-2 { width: 280px; height: 280px; filter: blur(64px); }
+  .auth-orb-3 { width: 220px; height: 220px; filter: blur(56px); left: 50%; }
 }
 @media (max-width: 420px) {
-  .auth-root { padding: 84px 14px 28px; }
-  .auth-card { padding: 30px 20px; border-radius: 21px; }
-  .auth-card-wrap { border-radius: 24px; }
+  .auth-root { padding: 72px 12px 20px; }
+  .auth-card { padding: 24px 16px; border-radius: 18px; }
+  .auth-card-wrap { border-radius: 21px; width: 100%; }
   .auth-logo-row { gap: 10px; }
   .auth-logo-icon { width: 44px; height: 44px; border-radius: 13px; font-size: 22px; }
-  .auth-logo-name { font-size: 20px; }
-  .auth-logo-sub { font-size: 9px; letter-spacing: 1.3px; }
-  .auth-tabs { margin-bottom: 22px; }
-  .auth-tab, .auth-input, .auth-btn { font-size: 13px; }
-  .auth-input { padding: 13px 44px 13px 44px; }
+  .auth-logo-name { font-size: 18px; }
+  .auth-logo-sub { font-size: 8px; letter-spacing: 1.1px; }
+  .auth-tabs { margin-bottom: 18px; }
+  .auth-tab, .auth-input, .auth-btn { font-size: 12.5px; }
+  .auth-input { padding: 12px 40px 12px 40px; }
+  .auth-pw-toggle { right: 12px; font-size: 11px; }
+  .auth-field-icon { left: 14px; font-size: 13px; }
 }
 /* ── Animated logo SVG ── */
 @keyframes tlg-draw {
@@ -698,81 +705,82 @@ function AuthCanvas({ dark }) {
   return <canvas ref={ref} className="auth-canvas" />;
 }
 
-/* ══════════════════════════════════════════════
-   PASSWORD STRENGTH HELPER
-══════════════════════════════════════════════ */
-function getStrength(pw) {
-  if (!pw) return { level: 0, label: "" };
-  let score = 0;
-  if (pw.length >= 6)  score++;
-  if (pw.length >= 10) score++;
-  if (/[A-Z]/.test(pw) || /[0-9]/.test(pw)) score++;
-  if (/[^A-Za-z0-9]/.test(pw)) score++;
-  if (score <= 1) return { level: 1, label: "Weak" };
-  if (score === 2) return { level: 2, label: "Fair" };
-  if (score === 3) return { level: 3, label: "Good" };
-  return { level: 4, label: "Strong" };
+export function useAuthStyles() {
+  useEffect(() => {
+    const existing = document.getElementById("tg-auth-css");
+    if (existing) {
+      existing.textContent = CSS;
+      return;
+    }
+    const s = document.createElement("style");
+    s.id = "tg-auth-css"; s.textContent = CSS;
+    document.head.appendChild(s);
+  }, []);
 }
 
-const STRENGTH_CLS = ["", "s-weak", "s-fair", "s-good", "s-strong"];
-const STRENGTH_LABEL_CLS = ["", "s-label-weak", "s-label-fair", "s-label-good", "s-label-strong"];
-
-/* ══════════════════════════════════════════════
-   LOGIN COMPONENT
-══════════════════════════════════════════════ */
-export default function Login({ setUser, onBack }) {
-  const [email,    setEmail]    = useState("");
-  const [password, setPassword] = useState("");
-  const [showPw,   setShowPw]   = useState(false);
-  const [mode,     setMode]     = useState("login");
-  const [loading,  setLoading]  = useState(false);
-  const [error,    setError]    = useState("");
-  const [dark,     setDark]     = useState(() => {
-    try { return localStorage.getItem("tg-dark") !== "false"; } catch { return true; }
-  });
-
-  // Inject CSS once
-  useEffect(() => {
-    if (!document.getElementById("tg-auth-css")) {
-      const s = document.createElement("style");
-      s.id = "tg-auth-css"; s.textContent = CSS;
-      document.head.appendChild(s);
-    }
-  }, []);
-
-  useEffect(() => { try { localStorage.setItem("tg-dark", dark); } catch {} }, [dark]);
-
-  const handleAuth = async () => {
-    if (!email || !password) return;
-    setLoading(true); setError("");
-    try {
-      const fn = mode === "login"
-        ? signInWithEmailAndPassword
-        : createUserWithEmailAndPassword;
-      const res = await fn(auth, email, password);
-      setUser(res.user);
-    } catch (err) {
-      setError(err.message.replace("Firebase: ", "").replace(/\(auth\/.*?\)\.?/g, "").trim());
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const sw = (m) => { setMode(m); setError(""); setShowPw(false); };
-  const onKey = e => { if (e.key === "Enter") handleAuth(); };
-
-  const strength = mode === "signup" ? getStrength(password) : null;
-
+export function AuthLogo() {
   return (
-    <div className={`auth-root ${dark ? "dark" : "light"}`}>
-      {/* ── Layered background ── */}
+    <div className="auth-logo-row">
+      <div className="auth-logo-icon" style={{overflow:'hidden'}}>
+        <svg width="100%" height="100%" viewBox="0 0 52 52" fill="none" style={{position:'absolute',inset:0}}>
+          {[
+            {x1:13,y1:17,x2:26,y2:12,d:0},
+            {x1:26,y1:12,x2:39,y2:21,d:0.7},
+            {x1:39,y1:21,x2:26,y2:40,d:1.4},
+            {x1:13,y1:17,x2:26,y2:40,d:2.1},
+          ].map((l,i)=>(
+            <line key={i} x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2}
+              stroke="rgba(255,255,255,0.45)" strokeWidth="1.5" strokeLinecap="round"
+              style={{strokeDasharray:28,strokeDashoffset:28,
+                animation:`tlg-draw 2.8s ease-in-out ${l.d}s infinite`}}/>
+          ))}
+          {[{cx:13,cy:17,r:3},{cx:26,cy:12,r:3},{cx:39,cy:21,r:3},{cx:26,cy:40,r:3.8}].map((c,i)=>(
+            <circle key={i} cx={c.cx} cy={c.cy} r={c.r} fill="white"
+              style={{animation:`tlg-draw 2.8s ease-in-out ${i*0.5}s infinite`,
+                strokeDasharray:'none',strokeDashoffset:0,opacity:0.9}}/>
+          ))}
+        </svg>
+      </div>
+      <div>
+        <div className="auth-logo-name">TaskGraph</div>
+        <div className="auth-logo-sub">Dependency Visualizer</div>
+      </div>
+    </div>
+  );
+}
+
+export function AuthTabs({activeMode, onSelectLogin, onSelectSignup}) {
+  return (
+    <div className="auth-tabs">
+      <button className={`auth-tab ${activeMode === "login" ? "active" : ""}`} onClick={onSelectLogin}>
+        Sign In
+      </button>
+      <button className={`auth-tab ${activeMode === "signup" ? "active" : ""}`} onClick={onSelectSignup}>
+        Create Account
+      </button>
+    </div>
+  );
+}
+
+export function AuthShell({
+  dark,
+  setDark,
+  onBack,
+  children,
+  wrapClassName = "",
+  cardClassName = "",
+  rootClassName = "",
+  showBackButton = true,
+  showThemeButton = true,
+}) {
+  return (
+    <div className={`auth-root ${dark ? "dark" : "light"} ${rootClassName}`.trim()}>
       <div className="auth-grid" />
       <AuthCanvas dark={dark} />
       <div className="auth-orb auth-orb-1" />
       <div className="auth-orb auth-orb-2" />
       <div className="auth-orb auth-orb-3" />
 
-      {/* ── Floating shapes ── */}
       <div className="auth-shapes" aria-hidden="true">
         {SHAPES.map(sh => (
           <div
@@ -795,158 +803,130 @@ export default function Login({ setUser, onBack }) {
         ))}
       </div>
 
-      {/* ── Back button ── */}
-      {onBack && (
+      {showBackButton && onBack && (
         <button className="auth-back-btn" onClick={onBack}>
           ← Back
         </button>
       )}
 
-      {/* ── Theme toggle ── */}
-      <button className="auth-theme-btn" onClick={() => setDark(d => !d)}>
-        {dark ? "☀️" : "🌙"}
-      </button>
+      {showThemeButton && (
+        <button className="auth-theme-btn" onClick={() => setDark(d => !d)}>
+          {dark ? "☀️" : "🌙"}
+        </button>
+      )}
 
-      {/* ══ CARD ══ */}
-      <div className="auth-card-wrap">
-        <div className={`auth-card ${dark ? "dark" : "light"}`}>
-
-          {/* Logo */}
-          <div className="auth-logo-row">
-            <div className="auth-logo-icon" style={{overflow:'hidden'}}>
-  <svg width="100%" height="100%" viewBox="0 0 52 52" fill="none" style={{position:'absolute',inset:0}}>
-    {[
-      {x1:13,y1:17,x2:26,y2:12,d:0},
-      {x1:26,y1:12,x2:39,y2:21,d:0.7},
-      {x1:39,y1:21,x2:26,y2:40,d:1.4},
-      {x1:13,y1:17,x2:26,y2:40,d:2.1},
-    ].map((l,i)=>(
-      <line key={i} x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2}
-        stroke="rgba(255,255,255,0.45)" strokeWidth="1.5" strokeLinecap="round"
-        style={{strokeDasharray:28,strokeDashoffset:28,
-          animation:`tlg-draw 2.8s ease-in-out ${l.d}s infinite`}}/>
-    ))}
-    {[{cx:13,cy:17,r:3},{cx:26,cy:12,r:3},{cx:39,cy:21,r:3},{cx:26,cy:40,r:3.8}].map((c,i)=>(
-      <circle key={i} cx={c.cx} cy={c.cy} r={c.r} fill="white"
-        style={{animation:`tlg-draw 2.8s ease-in-out ${i*0.5}s infinite`,
-          strokeDasharray:'none',strokeDashoffset:0,opacity:0.9}}/>
-    ))}
-  </svg>
-</div>
-            <div>
-              <div className="auth-logo-name">TaskGraph</div>
-              <div className="auth-logo-sub">Dependency Visualizer</div>
-            </div>
-          </div>
-
-          {/* Tabs */}
-          <div className="auth-tabs">
-            <button className={`auth-tab ${mode === "login"  ? "active" : ""}`} onClick={() => sw("login")}>
-              Sign In
-            </button>
-            <button className={`auth-tab ${mode === "signup" ? "active" : ""}`} onClick={() => sw("signup")}>
-              Create Account
-            </button>
-          </div>
-
-          {/* Error */}
-          {error && (
-            <div className="auth-err">
-              <span>⚠️</span>
-              <span>{error}</span>
-            </div>
-          )}
-
-          {/* Fields */}
-          <div className="auth-fields">
-            {/* Email */}
-            <div className="auth-field">
-              <span className="auth-field-icon">✉️</span>
-              <input
-                className="auth-input"
-                type="email"
-                placeholder="Email address"
-                value={email}
-                onChange={e => { setEmail(e.target.value); setError(""); }}
-                onKeyDown={onKey}
-                autoComplete="email"
-              />
-              <div className="auth-field-line" />
-            </div>
-
-            {/* Password */}
-            <div className="auth-field">
-              <span className="auth-field-icon">🔑</span>
-              <input
-                className={`auth-input has-toggle`}
-                type={showPw ? "text" : "password"}
-                placeholder={mode === "signup" ? "Password (min. 6 chars)" : "Password"}
-                value={password}
-                onChange={e => { setPassword(e.target.value); setError(""); }}
-                onKeyDown={onKey}
-                autoComplete={mode === "login" ? "current-password" : "new-password"}
-              />
-              {/* Show / Hide toggle */}
-              <button
-                type="button"
-                className="auth-pw-toggle"
-                onClick={() => setShowPw(v => !v)}
-                tabIndex={-1}
-                aria-label={showPw ? "Hide password" : "Show password"}
-              >
-                {showPw ? "Hide" : "Show"}
-              </button>
-              <div className="auth-field-line" />
-            </div>
-
-            {/* Strength bar — signup only */}
-            {mode === "signup" && password.length > 0 && strength && (
-              <div className="auth-strength">
-                <div className="auth-strength-bar">
-                  {[1,2,3,4].map(n => (
-                    <div
-                      key={n}
-                      className={`auth-strength-seg ${n <= strength.level ? STRENGTH_CLS[strength.level] : ""}`}
-                    />
-                  ))}
-                </div>
-                <span className={`auth-strength-label ${STRENGTH_LABEL_CLS[strength.level]}`}>
-                  {strength.label} password
-                </span>
-              </div>
-            )}
-          </div>
-
-          {/* Submit */}
-          <button
-            className={`auth-btn m-${mode}`}
-            onClick={handleAuth}
-            disabled={!email || !password || loading}
-          >
-            {loading && <span className="auth-spinner" />}
-            {loading
-              ? "Please wait…"
-              : mode === "login"
-              ? "Sign In  →"
-              : "Create Account  →"}
-          </button>
-
-          {/* Footer */}
-          <p className="auth-footer">
-            {mode === "login"
-              ? <>Don't have an account?{" "}
-                  <button type="button" className="auth-link" onClick={() => sw("signup")}>
-                    Sign up free
-                  </button>
-                </>
-              : <>Already registered?{" "}
-                  <button type="button" className="auth-link" onClick={() => sw("login")}>
-                    Sign in
-                  </button>
-                </>}
-          </p>
+      <div className={`auth-card-wrap ${wrapClassName}`.trim()}>
+        <div className={`auth-card ${dark ? "dark" : "light"} ${cardClassName}`.trim()}>
+          {children}
         </div>
       </div>
     </div>
+  );
+}
+
+/* ══════════════════════════════════════════════
+   LOGIN COMPONENT
+══════════════════════════════════════════════ */
+export default function Login({ onModeChange, onAuthSuccess, onBack, darkTheme, setDarkTheme }) {
+  const [email,    setEmail]    = useState("");
+  const [password, setPassword] = useState("");
+  const [showPw,   setShowPw]   = useState(false);
+  const [loading,  setLoading]  = useState(false);
+  const [error,    setError]    = useState("");
+  useAuthStyles();
+  const dark = Boolean(darkTheme);
+  const setDark = setDarkTheme;
+
+  const handleAuth = async () => {
+    if (!email || !password) return;
+    setLoading(true); setError("");
+    try {
+      const res = await signInWithEmailAndPassword(auth, email, password);
+      onAuthSuccess?.(res.user);
+    } catch (err) {
+      setError(err.message.replace("Firebase: ", "").replace(/\(auth\/.*?\)\.?/g, "").trim());
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const goToSignup = () => {
+    setError("");
+    setShowPw(false);
+    onModeChange?.("signup");
+  };
+  const onKey = e => { if (e.key === "Enter") handleAuth(); };
+
+  return (
+    <AuthShell dark={dark} setDark={setDark} onBack={onBack}>
+      <AuthLogo />
+      <AuthTabs
+        activeMode="login"
+        onSelectLogin={() => {}}
+        onSelectSignup={goToSignup}
+      />
+
+      {error && (
+        <div className="auth-err">
+          <span>⚠️</span>
+          <span>{error}</span>
+        </div>
+      )}
+
+      <div className="auth-fields">
+        <div className="auth-field">
+          <span className="auth-field-icon">✉️</span>
+          <input
+            className="auth-input"
+            type="email"
+            placeholder="Email address"
+            value={email}
+            onChange={e => { setEmail(e.target.value); setError(""); }}
+            onKeyDown={onKey}
+            autoComplete="email"
+          />
+          <div className="auth-field-line" />
+        </div>
+
+        <div className="auth-field">
+          <span className="auth-field-icon">🔑</span>
+          <input
+            className="auth-input has-toggle"
+            type={showPw ? "text" : "password"}
+            placeholder="Password"
+            value={password}
+            onChange={e => { setPassword(e.target.value); setError(""); }}
+            onKeyDown={onKey}
+            autoComplete="current-password"
+          />
+          <button
+            type="button"
+            className="auth-pw-toggle"
+            onClick={() => setShowPw(v => !v)}
+            tabIndex={-1}
+            aria-label={showPw ? "Hide password" : "Show password"}
+          >
+            {showPw ? "Hide" : "Show"}
+          </button>
+          <div className="auth-field-line" />
+        </div>
+      </div>
+
+      <button
+        className="auth-btn m-login"
+        onClick={handleAuth}
+        disabled={!email || !password || loading}
+      >
+        {loading && <span className="auth-spinner" />}
+        {loading ? "Please wait…" : "Sign In  →"}
+      </button>
+
+      <p className="auth-footer">
+        Don't have an account?{" "}
+        <button type="button" className="auth-link" onClick={goToSignup}>
+          Sign up free
+        </button>
+      </p>
+    </AuthShell>
   );
 }

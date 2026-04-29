@@ -2,11 +2,13 @@ import {
   buildGraph,
   formatUnlinkedTaskMessage,
   getBlockingTasks,
+  getTaskDependencies,
   hasLinkedDependency,
   getPendingTaskBlockMessage,
   hasCycle,
   isBlocked,
 } from "./taskLogic";
+import { formatUserDisplayName, getUserInitial } from "./userDisplay";
 
 const nodes = [
   {
@@ -50,8 +52,34 @@ test("requires unlinked tasks to be connected before completion", () => {
   );
 });
 
+test("returns parent and child dependencies for tooltip rendering", () => {
+  expect(getTaskDependencies("1", edges, nodes).children.map((node) => node.data.label)).toEqual([
+    "QA Testing",
+  ]);
+  expect(getTaskDependencies("1", edges, nodes).parents).toEqual([]);
+
+  expect(getTaskDependencies("2", edges, nodes).parents.map((node) => node.data.label)).toEqual([
+    "Design Mockup",
+  ]);
+  expect(getTaskDependencies("2", edges, nodes).children).toEqual([]);
+});
+
 test("still detects circular dependencies", () => {
   const cyclicEdges = [...edges, { id: "e2-1", source: "2", target: "1" }];
 
   expect(hasCycle(buildGraph(cyclicEdges))).toBe(true);
+});
+
+test("uses the profile display name when it exists", () => {
+  expect(formatUserDisplayName({
+    displayName: "Test User",
+    email: "test@gmail.com",
+  })).toBe("Test User");
+});
+
+test("falls back to a friendly name from email", () => {
+  const user = { email: "test.user_demo@gmail.com" };
+
+  expect(formatUserDisplayName(user)).toBe("Test User Demo");
+  expect(getUserInitial(user)).toBe("T");
 });

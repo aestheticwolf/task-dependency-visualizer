@@ -64,3 +64,51 @@ export function getPendingTaskBlockMessage(id, edges, nodes) {
   const blockers = getBlockingTasks(id, edges, nodes);
   return blockers.length ? formatBlockedTaskMessage(blockers) : null;
 }
+
+
+// ═══════════════════════════════════════════════════════
+// TOOLTIP HELPERS - Get dependency info for hover tooltips
+// ═══════════════════════════════════════════════════════
+
+export function getTaskDependencies(id, edges, nodes) {
+  // Get parent tasks (prerequisites)
+  const parents = edges
+    .filter(edge => edge.target === id)
+    .map(edge => nodes.find(n => n.id === edge.source))
+    .filter(n => n);
+  
+  // Get child tasks (dependents)
+  const children = edges
+    .filter(edge => edge.source === id)
+    .map(edge => nodes.find(n => n.id === edge.target))
+    .filter(n => n);
+  
+  return { parents, children };
+}
+
+export function formatTooltipContent(node, edges, nodes) {
+  const { parents, children } = getTaskDependencies(node.id, edges, nodes);
+  const { completed, label } = node.data;
+
+  let tooltip = `<b>${label}</b><br/>`;
+
+  if (completed) tooltip += "✓ Completed<br/>";
+  else if (isBlocked(node.id, edges, nodes)) tooltip += "🔒 Blocked<br/>";
+  else tooltip += "⚪ Ready<br/>";
+
+  if (parents.length) {
+    tooltip += "<br/>⬅ Depends on:<br/>";
+    parents.forEach(p => {
+      tooltip += `○ ${p.data.label}<br/>`;
+    });
+  }
+
+  if (children.length) {
+    tooltip += "<br/>➡ Required by:<br/>";
+    children.forEach(c => {
+      tooltip += `○ ${c.data.label}<br/>`;
+    });
+  }
+
+  return tooltip;
+}
