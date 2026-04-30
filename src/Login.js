@@ -522,17 +522,30 @@ const CSS = `
 }
 .auth-strength-bar {
   display: flex; gap: 4px;
+  padding: 2px 0;
 }
 .auth-strength-seg {
-  flex: 1; height: 3px; border-radius: 999px;
+  flex: 1; height: 4px; border-radius: 999px;
   background: rgba(255,255,255,0.1);
-  transition: background 0.3s ease;
+  transition: background 0.3s ease, box-shadow 0.3s ease, transform 0.3s ease;
 }
 .auth-root.light .auth-strength-seg { background: rgba(0,0,0,0.08); }
-.auth-strength-seg.s-weak   { background: #ef4444; }
-.auth-strength-seg.s-fair   { background: #f59e0b; }
-.auth-strength-seg.s-good   { background: #10b981; }
-.auth-strength-seg.s-strong { background: #00d4ff; }
+.auth-root .auth-strength-seg.s-weak {
+  background: linear-gradient(90deg, #f87171, #ef4444);
+  box-shadow: 0 0 0 1px rgba(239,68,68,0.12), 0 0 10px rgba(239,68,68,0.22);
+}
+.auth-root .auth-strength-seg.s-fair {
+  background: linear-gradient(90deg, #fbbf24, #f59e0b);
+  box-shadow: 0 0 0 1px rgba(245,158,11,0.12), 0 0 10px rgba(245,158,11,0.2);
+}
+.auth-root .auth-strength-seg.s-good {
+  background: linear-gradient(90deg, #34d399, #10b981);
+  box-shadow: 0 0 0 1px rgba(16,185,129,0.12), 0 0 10px rgba(16,185,129,0.2);
+}
+.auth-root .auth-strength-seg.s-strong {
+  background: linear-gradient(90deg, #22d3ee, #00d4ff);
+  box-shadow: 0 0 0 1px rgba(0,212,255,0.12), 0 0 10px rgba(0,212,255,0.2);
+}
 .auth-strength-label {
   font-size: 10.5px; font-weight: 700; letter-spacing: 0.5px;
   transition: color 0.3s;

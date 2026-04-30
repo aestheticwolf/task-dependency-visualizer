@@ -1,10 +1,13 @@
 import React, { useState } from "react";
-import { createUserWithEmailAndPassword } from "firebase/auth";
+import { createUserWithEmailAndPassword, updateProfile } from "firebase/auth";
 import { auth } from "./firebase";
 import {
+  normalizeDisplayName,
   formatAuthMessage,
+  getPasswordStrength,
   hasValidationErrors,
   PASSWORD_MIN_LENGTH,
+  validateDisplayName,
   validateEmailAddress,
   validateSignupForm,
 } from "./authValidation";
@@ -15,36 +18,25 @@ import {
   useAuthStyles,
 } from "./Login";
 
-function getStrength(pw) {
-  if (!pw) return { level: 0, label: "" };
-  let score = 0;
-  if (pw.length >= 6) score++;
-  if (pw.length >= 10) score++;
-  if (/[A-Z]/.test(pw) || /[0-9]/.test(pw)) score++;
-  if (/[^A-Za-z0-9]/.test(pw)) score++;
-  if (score <= 1) return { level: 1, label: "Weak" };
-  if (score === 2) return { level: 2, label: "Fair" };
-  if (score === 3) return { level: 3, label: "Good" };
-  return { level: 4, label: "Strong" };
-}
-
 const STRENGTH_CLS = ["", "s-weak", "s-fair", "s-good", "s-strong"];
 const STRENGTH_LABEL_CLS = ["", "s-label-weak", "s-label-fair", "s-label-good", "s-label-strong"];
 
 export default function Signup({ onModeChange, onAuthSuccess, onBack, darkTheme, setDarkTheme }) {
+  const [name,     setName]     = useState("");
   const [email,    setEmail]    = useState("");
   const [password, setPassword] = useState("");
   const [showPw,   setShowPw]   = useState(false);
   const [loading,  setLoading]  = useState(false);
   const [feedback, setFeedback] = useState(null);
-  const [fieldErrors, setFieldErrors] = useState({ email: "", password: "" });
+  const [fieldErrors, setFieldErrors] = useState({ name: "", email: "", password: "" });
   useAuthStyles();
   const dark = Boolean(darkTheme);
   const setDark = setDarkTheme;
 
   const handleSignup = async () => {
+    const normalizedName = normalizeDisplayName(name);
     const trimmedEmail = email.trim();
-    const nextErrors = validateSignupForm({ email: trimmedEmail, password });
+    const nextErrors = validateSignupForm({ name: normalizedName, email: trimmedEmail, password });
 
     setFieldErrors(nextErrors);
     setFeedback(null);
@@ -54,10 +46,16 @@ export default function Signup({ onModeChange, onAuthSuccess, onBack, darkTheme,
     }
 
     setLoading(true);
+    setName(normalizedName);
     setEmail(trimmedEmail);
     try {
       const res = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
-      onAuthSuccess?.(res.user);
+      await updateProfile(res.user, { displayName: normalizedName });
+      onAuthSuccess?.({
+        uid: res.user.uid,
+        email: res.user.email || trimmedEmail,
+        displayName: normalizedName,
+      });
     } catch (err) {
       setFeedback({ type: "error", message: formatAuthMessage(err, "signup") });
     } finally {
@@ -67,13 +65,13 @@ export default function Signup({ onModeChange, onAuthSuccess, onBack, darkTheme,
 
   const goToLogin = () => {
     setFeedback(null);
-    setFieldErrors({ email: "", password: "" });
+    setFieldErrors({ name: "", email: "", password: "" });
     setShowPw(false);
     onModeChange?.("login");
   };
 
   const onKey = e => { if (e.key === "Enter") handleSignup(); };
-  const strength = password.length > 0 ? getStrength(password) : null;
+  const strength = password.length > 0 ? getPasswordStrength(password) : null;
 
   return (
     <AuthShell dark={dark} setDark={setDark} onBack={onBack}>
@@ -92,6 +90,40 @@ export default function Signup({ onModeChange, onAuthSuccess, onBack, darkTheme,
       )}
 
       <div className="auth-fields">
+        <div className="auth-field">
+          <div className="auth-input-row">
+            <span className="auth-field-icon">👤</span>
+            <input
+              className="auth-input"
+              type="text"
+              placeholder="Full name"
+              value={name}
+              onChange={e => {
+                const nextName = e.target.value;
+                setName(nextName);
+                setFeedback(null);
+                setFieldErrors(prev =>
+                  prev.name ? { ...prev, name: validateDisplayName(nextName) } : prev
+                );
+              }}
+              onBlur={() =>
+                setFieldErrors(prev => ({ ...prev, name: validateDisplayName(name) }))
+              }
+              onKeyDown={onKey}
+              autoComplete="name"
+              aria-invalid={Boolean(fieldErrors.name)}
+              aria-describedby="signup-name-message"
+            />
+            <div className="auth-field-line" />
+          </div>
+          <div
+            id="signup-name-message"
+            className={`auth-field-msg ${fieldErrors.name ? "is-error" : ""}`.trim()}
+          >
+            {fieldErrors.name || "This name will appear on your dashboard and profile."}
+          </div>
+        </div>
+
         <div className="auth-field">
           <div className="auth-input-row">
             <span className="auth-field-icon">✉️</span>
@@ -139,14 +171,14 @@ export default function Signup({ onModeChange, onAuthSuccess, onBack, darkTheme,
                 setFeedback(null);
                 setFieldErrors(prev =>
                   prev.password
-                    ? { ...prev, password: validateSignupForm({ email: email.trim(), password: nextPassword }).password }
+                    ? { ...prev, password: validateSignupForm({ name, email: email.trim(), password: nextPassword }).password }
                     : prev
                 );
               }}
               onBlur={() =>
                 setFieldErrors(prev => ({
                   ...prev,
-                  password: validateSignupForm({ email: email.trim(), password }).password,
+                  password: validateSignupForm({ name, email: email.trim(), password }).password,
                 }))
               }
               onKeyDown={onKey}

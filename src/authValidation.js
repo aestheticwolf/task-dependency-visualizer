@@ -1,4 +1,5 @@
 export const PASSWORD_MIN_LENGTH = 6;
+export const DISPLAY_NAME_MAX_LENGTH = 60;
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -21,6 +22,28 @@ export function validateEmailAddress(email) {
   return "";
 }
 
+export function normalizeDisplayName(name) {
+  return (name || "").trim().replace(/\s+/g, " ");
+}
+
+export function validateDisplayName(name) {
+  const normalizedName = normalizeDisplayName(name);
+
+  if (!normalizedName) {
+    return "Enter your full name.";
+  }
+
+  if (normalizedName.length < 2) {
+    return "Use at least 2 characters for your name.";
+  }
+
+  if (normalizedName.length > DISPLAY_NAME_MAX_LENGTH) {
+    return `Use ${DISPLAY_NAME_MAX_LENGTH} characters or fewer for your name.`;
+  }
+
+  return "";
+}
+
 export function validateLoginForm({ email, password }) {
   return {
     email: validateEmailAddress(email),
@@ -28,7 +51,7 @@ export function validateLoginForm({ email, password }) {
   };
 }
 
-export function validateSignupForm({ email, password }) {
+export function validateSignupForm({ name, email, password }) {
   let passwordError = "";
 
   if (!password) {
@@ -38,9 +61,29 @@ export function validateSignupForm({ email, password }) {
   }
 
   return {
+    name: validateDisplayName(name),
     email: validateEmailAddress(email),
     password: passwordError,
   };
+}
+
+export function getPasswordStrength(password) {
+  if (!password) {
+    return { level: 0, label: "" };
+  }
+
+  let score = 0;
+
+  if (password.length >= PASSWORD_MIN_LENGTH) score++;
+  if (password.length >= 10) score++;
+  if (/[A-Z]/.test(password) || /[0-9]/.test(password)) score++;
+  if (/[^A-Za-z0-9]/.test(password)) score++;
+
+  if (score <= 1) return { level: 1, label: "Weak" };
+  if (score === 2) return { level: 2, label: "Fair" };
+  if (score === 3) return { level: 3, label: "Good" };
+
+  return { level: 4, label: "Strong" };
 }
 
 export function hasValidationErrors(errors) {

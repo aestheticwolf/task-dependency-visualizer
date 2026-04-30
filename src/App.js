@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import ReactFlow from "reactflow";
 import "reactflow/dist/style.css";
 import dagre from "dagre";
@@ -9,6 +9,10 @@ import Signup from "./Signup";
 import Landing from "./Landing";
 import Profile from "./Profile";
 import { buildWelcomeBanner } from "./welcomeGreeting";
+import {
+  buildBoardExportPayload,
+  parseBoardImportFile,
+} from "./boardTransfer";
 import {
   buildDependencyDocId,
   buildDependencyEdgeId,
@@ -28,9 +32,9 @@ import {
 import { formatUserDisplayName, getUserInitial } from "./userDisplay";
 import {
   collection, addDoc, getDocs, deleteDoc,
-  doc, onSnapshot, runTransaction, updateDoc,
+  doc, onSnapshot, runTransaction, updateDoc, writeBatch,
 } from "firebase/firestore";
-import { MiniMap, Controls, Background, Handle, Position, useNodeId, useUpdateNodeInternals } from "reactflow";
+import { MiniMap, Controls, Background, Handle, Position, applyNodeChanges, useNodeId, useUpdateNodeInternals } from "reactflow";
 
 const ROUTES = Object.freeze({
   landing: "/landing",
@@ -63,6 +67,14 @@ function normalizeRoute(pathname = ROUTES.landing) {
   return LEGACY_ROUTE_MAP[nextPath] || (VALID_ROUTES.has(nextPath) ? nextPath : ROUTES.landing);
 }
 
+function readStoredPanelCollapsed() {
+  try {
+    return localStorage.getItem("tg-panel-collapsed")==="true";
+  } catch {
+    return false;
+  }
+}
+
 const CANVAS_VIEWPORT = Object.freeze({
   minZoom: 0.45,
   maxZoom: 1.15,
@@ -70,6 +82,11 @@ const CANVAS_VIEWPORT = Object.freeze({
     compact: 0.12,
     desktop: 0.24,
   },
+});
+
+const VIEWPORT_BREAKPOINTS = Object.freeze({
+  mobile: 920,
+  compact: 700,
 });
 
 const LAYOUT_OPTIONS = Object.freeze([
@@ -104,6 +121,17 @@ const LAYOUT_OPTIONS = Object.freeze([
 ]);
 
 const VALID_LAYOUT_DIRECTIONS = new Set(LAYOUT_OPTIONS.map(option=>option.value));
+const FIRESTORE_BATCH_LIMIT = 400;
+
+function createBoardExportFilename(date = new Date()) {
+  const stamp = [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+
+  return `taskgraph-board-${stamp}.json`;
+}
 
 function getLayoutConfig(direction = "TB") {
   switch (direction) {
@@ -185,7 +213,7 @@ button, input, select, textarea {
   --border-hi:  rgba(0,212,255,0.3);
   --text-1:     #f8fafc;
   --text-2:     #94a3b8;
-  --text-3:     #475569;
+  --text-3:     #7b8da6;
   --input-bg:   rgba(255,255,255,0.05);
   --graph-bg:   #030b1a;
   --accent:     #00d4ff;
@@ -355,16 +383,28 @@ button, input, select, textarea {
   transform: translateX(-6px);
 }
 .tg-brand-icon {
-  width: 36px; height: 36px; border-radius: 11px;
+  width: 42px; height: 42px; border-radius: 13px;
   background: linear-gradient(135deg, #00d4ff, #7c3aed);
   display: flex; align-items: center; justify-content: center;
-  font-size: 18px; flex-shrink: 0;
+  font-size: 20px; flex-shrink: 0;
   position: relative; overflow: hidden;
   animation: tg-glow 3s ease-in-out infinite;
+}
+.tg-brand-icon::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border-radius: 17px;
+  border: 1.5px solid rgba(0,212,255,0.35);
+  animation: tg-brand-ring 3s ease-in-out infinite;
 }
 @keyframes tg-glow {
   0%,100% { box-shadow: 0 0 14px rgba(0,212,255,0.35); }
   50%      { box-shadow: 0 0 28px rgba(124,58,237,0.5); }
+}
+@keyframes tg-brand-ring {
+  0%,100% { transform: scale(1); opacity: 0.7; }
+  50% { transform: scale(1.12); opacity: 0; }
 }
 .tg-brand-name {
   font-family: 'Open Sans', sans-serif;
@@ -404,6 +444,13 @@ button, input, select, textarea {
   align-items: center;
   justify-content: center;
   width: 100%;
+}
+.tg-collapse-label {
+  display: none;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.03em;
 }
 .tg-logout-btn {
   position: relative;
@@ -1110,6 +1157,9 @@ button, input, select, textarea {
   font-weight: 600;
   line-height: 1.35;
 }
+.tg-layout-btn--active .tg-layout-btn-hint {
+  color: color-mix(in srgb, var(--text-1) 72%, var(--accent) 28%);
+}
 .tg-layout-note {
   color: var(--text-3);
   font-size: 11px;
@@ -1377,17 +1427,49 @@ button, input, select, textarea {
 .tg-btn:hover:not(:disabled)  { transform: translateY(-1px); }
 .tg-btn:active:not(:disabled) { transform: translateY(0); }
 .tg-btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none !important; }
+.tgd .tg-btn:disabled {
+  opacity: 0.46;
+  color: rgba(226,232,240,0.58);
+}
 .tg-btn-primary {
   background: linear-gradient(135deg, #38bdf8 0%, #60a5fa 48%, #a78bfa 100%);
   color: white; box-shadow: 0 12px 28px rgba(96,165,250,0.26);
 }
 .tg-btn-primary:hover:not(:disabled) { box-shadow: 0 16px 34px rgba(96,165,250,0.34); }
+.tg-btn-secondary {
+  background: var(--card);
+  color: var(--text-1);
+  border: 1px solid var(--border);
+  box-shadow: var(--surface-shadow);
+}
+.tg-btn-secondary:hover:not(:disabled) {
+  border-color: var(--border-hi);
+  background: var(--card-hov);
+  box-shadow: var(--surface-shadow-hi);
+}
 .tg-btn-danger {
   background: rgba(239,68,68,0.09);
   color: #f87171;
   border: 1px solid rgba(239,68,68,0.2);
 }
 .tg-btn-danger:hover:not(:disabled) { background: rgba(239,68,68,0.17); border-color: rgba(239,68,68,0.38); }
+.tg-btn-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tg-btn-row .tg-btn {
+  flex: 1 1 140px;
+}
+.tg-section-note {
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.tg-import-file {
+  display: none;
+}
 
 /* ── Hints ── */
 .tg-hints {
@@ -1671,6 +1753,10 @@ button, input, select, textarea {
 .react-flow__node-task:hover .tg-task-node-shell {
   transform: translateY(-2px) scale(1.012);
 }
+.react-flow__node-task:hover,
+.react-flow__node-task:focus-within {
+  z-index: 48 !important;
+}
 .react-flow__handle {
   width: 12px !important; height: 12px !important;
   opacity: 0 !important;
@@ -1678,6 +1764,58 @@ button, input, select, textarea {
   border: none !important;
   box-shadow: none !important;
   pointer-events: none !important;
+}
+.tg-task-handle {
+  width: 15px !important;
+  height: 15px !important;
+  opacity: 0.58 !important;
+  border: 2px solid rgba(255,255,255,0.86) !important;
+  pointer-events: all !important;
+  transition:
+    transform 0.18s ease,
+    opacity 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease !important;
+}
+.tg-task-handle--source {
+  background: linear-gradient(135deg, #22d3ee, #38bdf8) !important;
+  box-shadow: 0 0 0 3px rgba(34,211,238,0.12), 0 6px 14px rgba(14,165,233,0.26) !important;
+}
+.tg-task-handle--target {
+  background: linear-gradient(135deg, #a78bfa, #7c3aed) !important;
+  box-shadow: 0 0 0 3px rgba(167,139,250,0.12), 0 6px 14px rgba(124,58,237,0.22) !important;
+}
+.react-flow__node-task:hover .tg-task-handle,
+.react-flow__node-task:focus-within .tg-task-handle,
+.tg-task-handle.connectingfrom,
+.tg-task-handle.connectingto,
+.tg-task-handle.valid {
+  opacity: 1 !important;
+  transform: scale(1.08);
+}
+.tgd .tg-task-handle {
+  border-color: rgba(226,232,240,0.94) !important;
+}
+.tgd .tg-task-handle--source {
+  box-shadow: 0 0 0 3px rgba(34,211,238,0.16), 0 8px 18px rgba(14,165,233,0.34) !important;
+}
+.tgd .tg-task-handle--target {
+  box-shadow: 0 0 0 3px rgba(167,139,250,0.16), 0 8px 18px rgba(124,58,237,0.3) !important;
+}
+.tgl .tg-task-handle {
+  border-color: rgba(255,255,255,0.96) !important;
+}
+.react-flow__connection-path {
+  stroke-width: 2.6px !important;
+  stroke-dasharray: 6 6;
+}
+.tgd .react-flow__connection-path {
+  stroke: rgba(103,232,249,0.9) !important;
+  filter: drop-shadow(0 0 8px rgba(34,211,238,0.22));
+}
+.tgl .react-flow__connection-path {
+  stroke: rgba(59,130,246,0.82) !important;
+  filter: drop-shadow(0 0 8px rgba(59,130,246,0.14));
 }
 .tg-task-node-shell {
   position: relative;
@@ -1689,6 +1827,7 @@ button, input, select, textarea {
   text-align: center;
   box-sizing: border-box;
   padding: 14px 22px;
+  isolation: isolate;
   transition: transform 0.22s ease, box-shadow 0.22s ease;
 }
 .tg-task-node-label {
@@ -1697,13 +1836,13 @@ button, input, select, textarea {
 .tg-node-tooltip {
   position: absolute;
   left: 50%;
-  bottom: calc(100% + 14px);
+  bottom: calc(100% + 18px);
   transform: translate(-50%, 10px);
   width: min(280px, calc(100vw - 36px));
   padding: 13px 14px;
   border-radius: 15px;
   border: 1px solid var(--border-hi);
-  background: color-mix(in srgb, var(--panel-bg) 94%, transparent);
+  background: color-mix(in srgb, var(--panel-bg) 98%, transparent);
   color: var(--text-2);
   box-shadow: 0 18px 46px rgba(2,6,23,0.22);
   backdrop-filter: blur(18px);
@@ -1711,7 +1850,16 @@ button, input, select, textarea {
   visibility: hidden;
   pointer-events: none;
   transition: opacity 0.18s ease, transform 0.18s ease, visibility 0.18s ease;
-  z-index: 20;
+  z-index: 64;
+}
+.tgd .tg-node-tooltip {
+  background: rgba(7,15,40,0.98);
+  border-color: rgba(34,211,238,0.16);
+}
+.tgl .tg-node-tooltip {
+  background: rgba(255,255,255,0.985);
+  border-color: rgba(124,58,237,0.12);
+  box-shadow: 0 20px 46px rgba(15,23,42,0.18);
 }
 .tg-node-tooltip::after {
   content: "";
@@ -1722,6 +1870,12 @@ button, input, select, textarea {
   border-width: 8px 7px 0;
   border-style: solid;
   border-color: color-mix(in srgb, var(--panel-bg) 94%, transparent) transparent transparent;
+}
+.tgd .tg-node-tooltip::after {
+  border-color: rgba(7,15,40,0.98) transparent transparent;
+}
+.tgl .tg-node-tooltip::after {
+  border-color: rgba(255,255,255,0.985) transparent transparent;
 }
 .react-flow__node-task:hover .tg-node-tooltip,
 .react-flow__node-task:focus-within .tg-node-tooltip {
@@ -1837,10 +1991,11 @@ button, input, select, textarea {
   transition: stroke-width 0.24s ease, opacity 0.24s ease, filter 0.24s ease;
 }
 .react-flow__edge .tg-edge-flow {
-  stroke-dasharray: 4 9;
-  animation: tg-edge-stream 2.1s linear infinite;
-  filter: drop-shadow(0 0 7px rgba(255,255,255,0.16));
-  transition: opacity 0.24s ease, stroke-width 0.24s ease;
+  stroke-dasharray: 10 12;
+  animation: tg-edge-stream 1.2s linear infinite;
+  filter: drop-shadow(0 0 9px rgba(255,255,255,0.2));
+  opacity: 0.92;
+  transition: opacity 0.24s ease, stroke-width 0.24s ease, filter 0.24s ease;
 }
 .react-flow__edge .tg-edge-arrow {
   pointer-events: none;
@@ -1854,7 +2009,7 @@ button, input, select, textarea {
   filter: drop-shadow(0 10px 22px rgba(15,23,42,0.22));
 }
 .react-flow__edge.selected .tg-edge-flow {
-  animation-duration: 1.55s;
+  animation-duration: 0.9s;
 }
 .react-flow__edge.selected .tg-edge-arrow {
   filter: drop-shadow(0 10px 16px rgba(15,23,42,0.22));
@@ -1908,17 +2063,27 @@ button, input, select, textarea {
   box-shadow: var(--surface-shadow) !important;
   overflow: hidden;
 }
-.tgd .react-flow__minimap { background: rgba(5,13,31,0.82) !important; border: 1px solid rgba(0,212,255,0.1) !important; }
+.tgd .react-flow__minimap {
+  background:
+    linear-gradient(180deg, rgba(13,24,50,0.96), rgba(7,15,40,0.92)) !important;
+  border: 1px solid rgba(34,211,238,0.18) !important;
+  box-shadow:
+    0 18px 42px rgba(2,6,23,0.42),
+    0 0 0 1px rgba(103,232,249,0.06) inset !important;
+}
 .tgl .react-flow__minimap { background: rgba(255,255,255,0.86) !important; border: 1px solid rgba(99,102,241,0.1) !important; }
+.tgd .react-flow__minimap .react-flow__minimap-mask {
+  filter: drop-shadow(0 0 8px rgba(34,211,238,0.16));
+}
 
 @keyframes tg-progress-flow {
   0%   { background-position: 0% 50%; }
   100% { background-position: 140% 50%; }
 }
 @keyframes tg-edge-stream {
-  0%   { stroke-dashoffset: 42; opacity: 0.34; }
-  50%  { opacity: 0.98; }
-  100% { stroke-dashoffset: 0; opacity: 0.34; }
+  0%   { stroke-dashoffset: 44; opacity: 0.32; }
+  38%  { opacity: 1; }
+  100% { stroke-dashoffset: 0; opacity: 0.32; }
 }
 @keyframes tg-aurora {
   0%   { transform: translate3d(0, 0, 0) scale(1); }
@@ -1946,10 +2111,19 @@ button, input, select, textarea {
     gap: 10px;
   }
   .tg-collapse-btn {
-    display: none;
+    display: inline-flex;
+    width: auto;
+    min-width: 84px;
+    padding: 0 12px;
+    gap: 8px;
+    justify-content: center;
+  }
+  .tg-collapse-label {
+    display: inline-flex;
   }
   .tg-panel--collapsed {
     width: 100%;
+    height: auto;
   }
   .tg-panel--collapsed .tg-panel-head {
     padding: 12px 14px;
@@ -1997,8 +2171,7 @@ button, input, select, textarea {
     gap: 10px;
   }
   .tg-panel--collapsed .tg-panel-body {
-    display: flex;
-    padding: 10px 14px 18px;
+    display: none;
   }
   .tg-stats {
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2100,6 +2273,9 @@ button, input, select, textarea {
   .tg-panel {
     height: min(42dvh, 340px);
   }
+  .tg-panel--collapsed {
+    height: auto;
+  }
   .tg-panel-head {
     padding: 11px 12px;
   }
@@ -2159,6 +2335,13 @@ button, input, select, textarea {
   .tg-hints {
     font-size: 10.5px;
   }
+  .tg-btn-row {
+    flex-direction: column;
+  }
+  .tg-btn-row .tg-btn {
+    width: 100%;
+    flex-basis: auto;
+  }
   .tg-graph {
     flex-basis: 58dvh;
     min-height: 58dvh;
@@ -2217,10 +2400,10 @@ button, input, select, textarea {
 
 /* ── Animated logo SVG ── */
 @keyframes tlg-draw {
-  0%   { stroke-dashoffset: 22; opacity: 0; }
+  0%   { stroke-dashoffset: 28; opacity: 0; }
   18%  { opacity: 1; }
   65%  { stroke-dashoffset: 0; opacity: 1; }
-  100% { stroke-dashoffset: -22; opacity: 0; }
+  100% { stroke-dashoffset: -28; opacity: 0; }
 }
 .tg-brand-icon { overflow: hidden; }
 
@@ -2244,9 +2427,95 @@ button, input, select, textarea {
 `;
 
 const NW=230, NH=68;
-function layoutNodes(nodes, edges, direction = "TB") {
-  if (!nodes.length) return [];
+function hasFiniteNodePosition(position) {
+  return Number.isFinite(position?.x) && Number.isFinite(position?.y);
+}
 
+function isLegacyBoardLayout(nodes) {
+  return nodes.length > 1 && nodes.every(node =>
+    !hasFiniteNodePosition(node.position) || (node.position.x === 0 && node.position.y === 0)
+  );
+}
+
+function snapLinearFlowPositions(positionedNodes, edges, layout) {
+  if (positionedNodes.length < 2 || !edges.length) return positionedNodes;
+
+  const nodeById = new Map(positionedNodes.map(node => [node.id, node]));
+  const validEdges = edges.filter(edge => nodeById.has(edge.source) && nodeById.has(edge.target));
+  if (!validEdges.length) return positionedNodes;
+
+  const neighbors = new Map(positionedNodes.map(node => [node.id, new Set()]));
+  const incomingCount = new Map();
+  const outgoingCount = new Map();
+
+  validEdges.forEach(edge => {
+    neighbors.get(edge.source)?.add(edge.target);
+    neighbors.get(edge.target)?.add(edge.source);
+    outgoingCount.set(edge.source, (outgoingCount.get(edge.source) || 0) + 1);
+    incomingCount.set(edge.target, (incomingCount.get(edge.target) || 0) + 1);
+  });
+
+  const visited = new Set();
+  const alignedAxisById = new Map();
+  const axisKey = layout.horizontal ? "y" : "x";
+
+  positionedNodes.forEach(node => {
+    if (visited.has(node.id)) return;
+
+    const stack = [node.id];
+    const componentIds = [];
+
+    while (stack.length) {
+      const currentId = stack.pop();
+      if (!currentId || visited.has(currentId)) continue;
+      visited.add(currentId);
+      componentIds.push(currentId);
+      neighbors.get(currentId)?.forEach(nextId => {
+        if (!visited.has(nextId)) stack.push(nextId);
+      });
+    }
+
+    if (componentIds.length < 2) return;
+
+    const componentNodeIds = new Set(componentIds);
+    const componentEdges = validEdges.filter(edge =>
+      componentNodeIds.has(edge.source) && componentNodeIds.has(edge.target)
+    );
+
+    const isLinearFlow =
+      componentEdges.length === componentIds.length - 1 &&
+      componentIds.every(id =>
+        (incomingCount.get(id) || 0) <= 1 &&
+        (outgoingCount.get(id) || 0) <= 1
+      );
+
+    if (!isLinearFlow) return;
+
+    const alignedAxis = Math.round(
+      componentIds.reduce((sum, id) => sum + (nodeById.get(id)?.position?.[axisKey] || 0), 0) /
+      componentIds.length
+    );
+
+    componentIds.forEach(id => alignedAxisById.set(id, alignedAxis));
+  });
+
+  if (!alignedAxisById.size) return positionedNodes;
+
+  return positionedNodes.map(node => (
+    alignedAxisById.has(node.id)
+      ? {
+          ...node,
+          position: {
+            ...node.position,
+            [axisKey]: alignedAxisById.get(node.id),
+          },
+        }
+      : node
+  ));
+}
+
+function computeAutoLayoutNodes(nodes, edges, direction = "TB") {
+  if (!nodes.length) return [];
   const layout = getLayoutConfig(direction);
   const orderedNodes=[...nodes].sort((a,b)=>{
     const na=Number(a.id), nb=Number(b.id);
@@ -2290,13 +2559,40 @@ function layoutNodes(nodes, edges, direction = "TB") {
   orderedNodes.forEach(n=>g.setNode(n.id,{width:NW,height:NH}));
   validEdges.forEach(e=>g.setEdge(e.source,e.target));
   dagre.layout(g);
-  return orderedNodes.map((n,i)=>{
+  const laidOutNodes = orderedNodes.map((n,i)=>{
     const p=g.node(n.id);
     const fallback = layout.horizontal
       ? {x:Math.floor(i/4)*(NW+layout.gapX),y:(i%4)*(NH+layout.gapY)}
       : {x:(i%4)*(NW+layout.gapX),y:Math.floor(i/4)*(NH+layout.gapY)};
     return withHandles(n,p ? {x:p.x-NW/2,y:p.y-NH/2} : fallback);
   });
+  return snapLinearFlowPositions(laidOutNodes, validEdges, layout);
+}
+
+function layoutNodes(nodes, edges, direction = "TB") {
+  if (!nodes.length) return [];
+  if (isLegacyBoardLayout(nodes)) {
+    return computeAutoLayoutNodes(nodes, edges, direction);
+  }
+
+  const layout = getLayoutConfig(direction);
+  const orderedNodes=[...nodes].sort((a,b)=>{
+    const na=Number(a.id), nb=Number(b.id);
+    if(Number.isFinite(na)&&Number.isFinite(nb)) return na-nb;
+    return String(a.id).localeCompare(String(b.id));
+  });
+
+  return orderedNodes.map((node, index)=>({
+    ...node,
+    sourcePosition: layout.sourcePosition,
+    targetPosition: layout.targetPosition,
+    position: hasFiniteNodePosition(node.position)
+      ? node.position
+      : (computeAutoLayoutNodes([node], [], direction)[0]?.position || {
+          x:(index%4)*(NW+layout.gapX),
+          y:Math.floor(index/4)*(NH+layout.gapY),
+        }),
+  }));
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -2368,11 +2664,13 @@ function TaskNode({data}) {
   const nodeId = useNodeId();
   const updateNodeInternals = useUpdateNodeInternals();
 
-  useEffect(()=>{
+  useLayoutEffect(()=>{
     if(!nodeId) return undefined;
+    updateNodeInternals(nodeId);
     let frame = requestAnimationFrame(()=>updateNodeInternals(nodeId));
     return ()=>cancelAnimationFrame(frame);
   },[
+    data.positionSyncKey,
     data.sourceHandlePosition,
     data.targetHandlePosition,
     nodeId,
@@ -2380,11 +2678,22 @@ function TaskNode({data}) {
   ]);
 
   return (
-    <div className="tg-task-node-shell" style={data.cardStyle} aria-label={data.accessibleLabel}>
+    <div
+      className="tg-task-node-shell"
+      style={data.cardStyle}
+      aria-label={data.accessibleLabel}
+      onDoubleClick={event => {
+        event.preventDefault();
+        event.stopPropagation();
+        data.onRequestDelete?.();
+      }}
+    >
       <Handle
         key={`target-${data.targetHandlePosition || Position.Top}`}
         type="target"
         position={data.targetHandlePosition || Position.Top}
+        className="tg-task-handle tg-task-handle--target"
+        aria-label={`Connect a prerequisite into ${data.label}`}
       />
       <div className="tg-task-node-label">{data.label}</div>
       <div className="tg-node-tooltip" role="tooltip" aria-hidden="true">
@@ -2414,6 +2723,8 @@ function TaskNode({data}) {
         key={`source-${data.sourceHandlePosition || Position.Bottom}`}
         type="source"
         position={data.sourceHandlePosition || Position.Bottom}
+        className="tg-task-handle tg-task-handle--source"
+        aria-label={`Connect ${data.label} into another task`}
       />
     </div>
   );
@@ -2437,7 +2748,7 @@ function buildDependencyPath({
     const deltaY = Math.abs(targetY - sourceY);
     const midX = sourceX + (targetX - sourceX) / 2;
 
-    if (deltaY <= 18) {
+    if (deltaY <= 2) {
       return `M ${sourceX} ${sourceY} L ${targetX} ${targetY}`;
     }
 
@@ -2452,7 +2763,7 @@ function buildDependencyPath({
   const midY = sourceY + (targetY - sourceY) / 2;
   const deltaX = Math.abs(targetX - sourceX);
 
-  if (deltaX <= 18) {
+  if (deltaX <= 2) {
     return `M ${sourceX} ${sourceY} L ${targetX} ${targetY}`;
   }
 
@@ -2462,6 +2773,36 @@ function buildDependencyPath({
     `L ${targetX} ${midY}`,
     `L ${targetX} ${targetY}`,
   ].join(" ");
+}
+
+function getTrimmedTargetPoint(targetX, targetY, targetPosition, arrowGap = 11.5) {
+  switch (targetPosition) {
+    case Position.Top:
+      return {x: targetX, y: targetY - arrowGap};
+    case Position.Bottom:
+      return {x: targetX, y: targetY + arrowGap};
+    case Position.Left:
+      return {x: targetX - arrowGap, y: targetY};
+    case Position.Right:
+      return {x: targetX + arrowGap, y: targetY};
+    default:
+      return {x: targetX, y: targetY};
+  }
+}
+
+function buildArrowPoints(targetX, targetY, targetPosition, arrowWidth = 7.5, arrowDepth = 11.5) {
+  switch (targetPosition) {
+    case Position.Top:
+      return `${targetX},${targetY} ${targetX - arrowWidth},${targetY - arrowDepth} ${targetX + arrowWidth},${targetY - arrowDepth}`;
+    case Position.Bottom:
+      return `${targetX},${targetY} ${targetX - arrowWidth},${targetY + arrowDepth} ${targetX + arrowWidth},${targetY + arrowDepth}`;
+    case Position.Left:
+      return `${targetX},${targetY} ${targetX - arrowDepth},${targetY - arrowWidth} ${targetX - arrowDepth},${targetY + arrowWidth}`;
+    case Position.Right:
+      return `${targetX},${targetY} ${targetX + arrowDepth},${targetY - arrowWidth} ${targetX + arrowDepth},${targetY + arrowWidth}`;
+    default:
+      return `${targetX},${targetY} ${targetX - arrowWidth},${targetY - arrowDepth} ${targetX + arrowWidth},${targetY - arrowDepth}`;
+  }
 }
 
 function DependencyEdge({
@@ -2479,20 +2820,7 @@ function DependencyEdge({
   const arrowWidth = 7.5;
   const arrowDepth = 11.5;
   const arrowGap = arrowDepth;
-  const trimmedTarget = (() => {
-    switch (targetPosition) {
-      case Position.Top:
-        return {x: targetX, y: targetY - arrowGap};
-      case Position.Bottom:
-        return {x: targetX, y: targetY + arrowGap};
-      case Position.Left:
-        return {x: targetX - arrowGap, y: targetY};
-      case Position.Right:
-        return {x: targetX + arrowGap, y: targetY};
-      default:
-        return {x: targetX, y: targetY};
-    }
-  })();
+  const trimmedTarget = getTrimmedTargetPoint(targetX, targetY, targetPosition, arrowGap);
 
   const edgePath = buildDependencyPath({
     sourceX,
@@ -2516,20 +2844,7 @@ function DependencyEdge({
   const haloStroke = data?.haloStroke || lineStroke;
   const arrowStroke = data?.arrowStroke || lineStroke;
   const lineWidth = Number(style?.strokeWidth) || 2.6;
-  const arrowPoints = (() => {
-    switch (targetPosition) {
-      case Position.Top:
-        return `${targetX},${targetY} ${targetX - arrowWidth},${targetY - arrowDepth} ${targetX + arrowWidth},${targetY - arrowDepth}`;
-      case Position.Bottom:
-        return `${targetX},${targetY} ${targetX - arrowWidth},${targetY + arrowDepth} ${targetX + arrowWidth},${targetY + arrowDepth}`;
-      case Position.Left:
-        return `${targetX},${targetY} ${targetX - arrowDepth},${targetY - arrowWidth} ${targetX - arrowDepth},${targetY + arrowWidth}`;
-      case Position.Right:
-        return `${targetX},${targetY} ${targetX + arrowDepth},${targetY - arrowWidth} ${targetX + arrowDepth},${targetY + arrowWidth}`;
-      default:
-        return `${targetX},${targetY} ${targetX - arrowWidth},${targetY - arrowDepth} ${targetX + arrowWidth},${targetY - arrowDepth}`;
-    }
-  })();
+  const arrowPoints = buildArrowPoints(targetX, targetY, targetPosition, arrowWidth, arrowDepth);
 
   return (
     <>
@@ -2585,6 +2900,66 @@ function DependencyEdge({
           strokeWidth: interactionWidth,
           strokeLinecap: "round",
           strokeLinejoin: "round",
+        }}
+      />
+    </>
+  );
+}
+
+function DependencyConnectionLine({
+  fromX,
+  fromY,
+  toX,
+  toY,
+  fromPosition,
+  toPosition,
+  connectionStatus,
+}) {
+  const previewTargetPosition =
+    toPosition ||
+    (fromPosition === Position.Left
+      ? Position.Right
+      : fromPosition === Position.Right
+        ? Position.Left
+        : fromPosition === Position.Top
+          ? Position.Bottom
+          : Position.Top);
+  const trimmedTarget = getTrimmedTargetPoint(toX, toY, previewTargetPosition);
+  const previewPath = buildDependencyPath({
+    sourceX: fromX,
+    sourceY: fromY,
+    targetX: trimmedTarget.x,
+    targetY: trimmedTarget.y,
+    sourcePosition: fromPosition,
+    targetPosition: previewTargetPosition,
+  });
+  const previewArrow = buildArrowPoints(toX, toY, previewTargetPosition);
+  const strokeColor = connectionStatus === "invalid"
+    ? "var(--status-blocked)"
+    : "var(--accent)";
+  const glowFilter = connectionStatus === "invalid"
+    ? "drop-shadow(0 0 8px rgba(239,68,68,0.22))"
+    : "drop-shadow(0 0 8px rgba(0,212,255,0.22))";
+
+  return (
+    <>
+      <path
+        d={previewPath}
+        style={{
+          fill: "none",
+          stroke: strokeColor,
+          strokeWidth: 2.6,
+          strokeLinecap: "round",
+          strokeLinejoin: "round",
+          strokeDasharray: "6 6",
+          filter: glowFilter,
+        }}
+      />
+      <polygon
+        points={previewArrow}
+        style={{
+          fill: strokeColor,
+          opacity: 0.92,
         }}
       />
     </>
@@ -2806,6 +3181,10 @@ function buildTaskFilterEmptyMessage(searchTerm, filterLabel, hasStatusFilter) {
    APP
 ═══════════════════════════════════════════════════════ */
 export default function App() {
+  const initialMobileViewport =
+    typeof window !== "undefined" && window.innerWidth <= VIEWPORT_BREAKPOINTS.mobile;
+  const initialCompactViewport =
+    typeof window !== "undefined" && window.innerWidth < VIEWPORT_BREAKPOINTS.compact;
   const [user,     setUser]     = useState(null);
   const [authReady,setAuthReady]= useState(false);
   const [route,    setRoute]    = useState(()=>normalizeRoute(
@@ -2825,6 +3204,8 @@ export default function App() {
   const [welcomeBanner, setWelcomeBanner] = useState(null);
   const [boardReady, setBoardReady] = useState(false);
   const [boardError, setBoardError] = useState("");
+  const [isMobileViewport, setIsMobileViewport] = useState(initialMobileViewport);
+  const [isCompactViewport, setIsCompactViewport] = useState(initialCompactViewport);
   const [dark, setDark] = useState(() => {
     try {
       return localStorage.getItem("tg-dark") !== "false";
@@ -2833,7 +3214,10 @@ export default function App() {
     }
   });
   const [panelCollapsed, setPanelCollapsed] = useState(()=>{
-    try{return localStorage.getItem("tg-panel-collapsed")==="true";}catch{return false;}
+    if (typeof window !== "undefined" && window.innerWidth <= VIEWPORT_BREAKPOINTS.mobile) {
+      return true;
+    }
+    return readStoredPanelCollapsed();
   });
   const [layoutDirection, setLayoutDirection] = useState(()=>{
     try{
@@ -2849,8 +3233,13 @@ export default function App() {
   const mResolve   = useRef(null);
   const flowRef    = useRef(null);
   const graphRef   = useRef(null);
+  const importFileRef = useRef(null);
   const pendingDashboardWelcome = useRef(false);
   const hasShownDashboardWelcome = useRef(false);
+  const previousMobileViewport = useRef(initialMobileViewport);
+  const suppressNodeClickRef = useRef(false);
+  const interactionSuppressTimerRef = useRef(null);
+  const legacyLayoutHydratingRef = useRef(false);
 
   const navigate = useCallback((nextRoute, {replace=false} = {}) => {
     const normalizedRoute = normalizeRoute(nextRoute);
@@ -2863,14 +3252,30 @@ export default function App() {
     setRoute(normalizedRoute);
   }, []);
 
+  const suppressNodeClicksTemporarily = useCallback((duration = 220) => {
+    suppressNodeClickRef.current = true;
+    if (interactionSuppressTimerRef.current) {
+      clearTimeout(interactionSuppressTimerRef.current);
+    }
+    interactionSuppressTimerRef.current = setTimeout(() => {
+      suppressNodeClickRef.current = false;
+      interactionSuppressTimerRef.current = null;
+    }, duration);
+  }, []);
+
   const fitGraph = useCallback((duration=450)=>{
     if(!flowRef.current) return;
-    const compact = typeof window !== "undefined" && window.innerWidth < 700;
     flowRef.current.fitView({
-      padding: compact ? CANVAS_VIEWPORT.fitPadding.compact : CANVAS_VIEWPORT.fitPadding.desktop,
+      padding: isCompactViewport ? CANVAS_VIEWPORT.fitPadding.compact : CANVAS_VIEWPORT.fitPadding.desktop,
       duration,
     });
-  },[]);
+  },[isCompactViewport]);
+
+  useEffect(() => () => {
+    if (interactionSuppressTimerRef.current) {
+      clearTimeout(interactionSuppressTimerRef.current);
+    }
+  }, []);
 
   const ensureBoardReady = useCallback(() => {
     if (!user) {
@@ -2901,7 +3306,12 @@ export default function App() {
     document.head.appendChild(s);
   },[]);
 
-  useEffect(()=>{ try{localStorage.setItem("tg-panel-collapsed",panelCollapsed);}catch{} },[panelCollapsed]);
+  useEffect(()=>{
+    if (isMobileViewport) return;
+    try {
+      localStorage.setItem("tg-panel-collapsed", String(panelCollapsed));
+    } catch {}
+  },[isMobileViewport, panelCollapsed]);
   useEffect(()=>{ try{localStorage.setItem("tg-layout-direction",layoutDirection);}catch{} },[layoutDirection]);
   useEffect(() => {
     try {
@@ -2912,6 +3322,27 @@ export default function App() {
       document.body?.setAttribute("data-tg-theme", dark ? "dark" : "light");
     }
   }, [dark]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return undefined;
+
+    const syncViewport = () => {
+      const nextMobile = window.innerWidth <= VIEWPORT_BREAKPOINTS.mobile;
+      const nextCompact = window.innerWidth < VIEWPORT_BREAKPOINTS.compact;
+
+      setIsMobileViewport(nextMobile);
+      setIsCompactViewport(nextCompact);
+
+      if (previousMobileViewport.current !== nextMobile) {
+        previousMobileViewport.current = nextMobile;
+        setPanelCollapsed(nextMobile ? true : readStoredPanelCollapsed());
+      }
+    };
+
+    syncViewport();
+    window.addEventListener("resize", syncViewport);
+    return () => window.removeEventListener("resize", syncViewport);
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -3091,6 +3522,30 @@ export default function App() {
     return()=>{cancelAnimationFrame(frame);ro.disconnect();};
   },[fitGraph]);
 
+  const buildNextTaskPosition = useCallback(() => {
+    const positionedNodes = layoutNodes(nodes, edges, layoutDirection);
+    if (!positionedNodes.length) {
+      return { x: 0, y: 0 };
+    }
+
+    const layout = getLayoutConfig(layoutDirection);
+    if (layout.horizontal) {
+      const maxX = Math.max(...positionedNodes.map(node => node.position?.x ?? 0));
+      const anchorY = positionedNodes[0]?.position?.y ?? 0;
+      return {
+        x: maxX + NW + layout.gapX,
+        y: anchorY,
+      };
+    }
+
+    const maxY = Math.max(...positionedNodes.map(node => node.position?.y ?? 0));
+    const anchorX = positionedNodes[0]?.position?.x ?? 0;
+    return {
+      x: anchorX,
+      y: maxY + NH + layout.gapY,
+    };
+  }, [edges, layoutDirection, nodes]);
+
   // CRUD
   const deleteNode=async(nodeId,label)=>{
     if(!ensureBoardReady()) return;
@@ -3118,11 +3573,12 @@ export default function App() {
     if(!ensureBoardReady()) return;
     if(!taskName.trim()) return;
     const nextTaskName = taskName.trim();
+    const nextPosition = buildNextTaskPosition();
     try {
       await addDoc(collection(db,"users",user.uid,"nodes"),{
         id:Date.now().toString(),
         data:{label:nextTaskName,completed:false},
-        position:{x:0,y:0}
+        position:nextPosition
       });
       toast(`"${nextTaskName}" added`,"success");
       setTaskName("");
@@ -3161,17 +3617,25 @@ export default function App() {
     setEditTaskName("");
   };
 
-  const addDep=async()=>{
-    if(!ensureBoardReady()) return;
+  const createDependency = async ({
+    sourceId,
+    targetId,
+    resetSelectors = false,
+  }) => {
+    if(!ensureBoardReady()) return false;
+
+    let nextLayoutNodes = null;
+    let nextLayoutEdges = null;
+
     const localValidation = validateDependencyLink({
-      sourceId: parent,
-      targetId: child,
+      sourceId,
+      targetId,
       nodes,
       edges,
     });
     if(localValidation){
       toast(localValidation.message, localValidation.type);
-      return;
+      return false;
     }
 
     try {
@@ -3187,8 +3651,8 @@ export default function App() {
         .filter(item => item?.source && item?.target);
 
       const serverValidation = validateDependencyLink({
-        sourceId: parent,
-        targetId: child,
+        sourceId,
+        targetId,
         nodes: currentNodes,
         edges: currentEdges,
       });
@@ -3199,16 +3663,16 @@ export default function App() {
           if(!currentNodeIds.has(child)) setChild("");
         }
         toast(serverValidation.message, serverValidation.type);
-        return;
+        return false;
       }
 
       const nextEdge = {
-        id: buildDependencyEdgeId(parent, child),
-        source: parent,
-        target: child,
+        id: buildDependencyEdgeId(sourceId, targetId),
+        source: sourceId,
+        target: targetId,
         animated: true,
       };
-      const edgeRef = doc(db, "users", user.uid, "edges", buildDependencyDocId(parent, child));
+      const edgeRef = doc(db, "users", user.uid, "edges", buildDependencyDocId(sourceId, targetId));
 
       await runTransaction(db, async transaction => {
         const existingEdge = await transaction.get(edgeRef);
@@ -3220,53 +3684,139 @@ export default function App() {
 
         transaction.set(edgeRef, nextEdge);
       });
+
+      nextLayoutEdges = [...currentEdges, nextEdge];
+      nextLayoutNodes = computeAutoLayoutNodes(currentNodes, nextLayoutEdges, layoutDirection);
+
+      setNodes(currentNodesForView => mergeNodePositions(currentNodesForView, nextLayoutNodes));
+      setEdges(currentEdgesForView => (
+        currentEdgesForView.some(edge => edge.id === nextEdge.id)
+          ? currentEdgesForView
+          : nextLayoutEdges
+      ));
     } catch (error) {
       if (error?.code === "dependency/duplicate") {
         toast("Dependency already exists", "warn");
-        return;
+        return false;
       }
 
       toast("Could not link tasks right now. Please try again.", "error");
-      return;
+      return false;
+    }
+
+    if (resetSelectors) {
+      setParent("");
+      setChild("");
+    }
+
+    if (nextLayoutNodes?.length && nextLayoutEdges?.length) {
+      await persistNodePositions(nextLayoutNodes, { silent: true });
     }
 
     toast("Tasks linked","success");
-    setParent("");setChild("");
+    return true;
   };
 
-  const onNodeClick=(_,node)=>{
+  const addDep=async()=>{
+    await createDependency({
+      sourceId: parent,
+      targetId: child,
+      resetSelectors: true,
+    });
+  };
+
+  const onConnect = async connection => {
+    if (!connection?.source || !connection?.target) return;
+    await createDependency({
+      sourceId: connection.source,
+      targetId: connection.target,
+      resetSelectors: false,
+    });
+  };
+
+  const onNodesChange = useCallback(changes => {
+    setNodes(currentNodes => applyNodeChanges(changes, currentNodes));
+  }, []);
+
+  const onNodeDragStart = useCallback(() => {
+    if (clickTimer.current) {
+      clearTimeout(clickTimer.current);
+      clickTimer.current = null;
+    }
+    suppressNodeClicksTemporarily(260);
+  }, [suppressNodeClicksTemporarily]);
+
+  const onNodeDragStop = useCallback(async (_, node) => {
+    suppressNodeClicksTemporarily(260);
+
+    if (!ensureBoardReady()) return;
+
+    try {
+      const nodeSnapshot = await getDocs(collection(db,"users",user.uid,"nodes"));
+      const matchingNode = nodeSnapshot.docs.find(snapshot => snapshot.data().id === node.id);
+      if (matchingNode && hasFiniteNodePosition(node.position)) {
+        await updateDoc(matchingNode.ref, {
+          position: {
+            x: node.position.x,
+            y: node.position.y,
+          },
+        });
+      }
+    } catch (error) {
+      toast("Could not save this task position right now. Please try again.", "error");
+    }
+  }, [ensureBoardReady, suppressNodeClicksTemporarily, toast, user]);
+
+  const onConnectStart = useCallback(() => {
+    if (clickTimer.current) {
+      clearTimeout(clickTimer.current);
+      clickTimer.current = null;
+    }
+    suppressNodeClicksTemporarily(260);
+  }, [suppressNodeClicksTemporarily]);
+
+  const onConnectEnd = useCallback(() => {
+    suppressNodeClicksTemporarily(260);
+  }, [suppressNodeClicksTemporarily]);
+
+  const onNodeClick=(event,node)=>{
+    if (suppressNodeClickRef.current) {
+      return;
+    }
+    if (event?.target?.closest?.(".react-flow__handle")) {
+      return;
+    }
     if(!ensureBoardReady()) return;
     if(clickTimer.current){
-      clearTimeout(clickTimer.current);clickTimer.current=null;
-      deleteNode(node.id,node.data.label);
-    } else {
-      clickTimer.current=setTimeout(async()=>{
-        try {
-          const ns=await getDocs(collection(db,"users",user.uid,"nodes"));
-          const d=ns.docs.find(x=>x.data().id===node.id);
-          if(d){
-            const was=d.data().data.completed;
-            const linked=hasLinkedDependency(node.id,edges);
-            if(!was&&!linked){
-              toast(formatUnlinkedTaskMessage(node.data.label),"warn");
-              clickTimer.current=null;
-              return;
-            }
-            const blockers=getBlockingTasks(node.id,edges,nodes);
-            if(!was&&blockers.length){
-              toast(formatBlockedTaskMessage(blockers),"warn");
-              clickTimer.current=null;
-              return;
-            }
-            await updateDoc(doc(db,"users",user.uid,"nodes",d.id),{"data.completed":!was});
-            toast(was?"Marked as pending":"Completed",was?"info":"success");
-          }
-        } catch (error) {
-          toast("Could not update this task right now. Please try again.", "error");
-        }
-        clickTimer.current=null;
-      },260);
+      clearTimeout(clickTimer.current);
+      clickTimer.current=null;
     }
+    clickTimer.current=setTimeout(async()=>{
+      try {
+        const ns=await getDocs(collection(db,"users",user.uid,"nodes"));
+        const d=ns.docs.find(x=>x.data().id===node.id);
+        if(d){
+          const was=d.data().data.completed;
+          const linked=hasLinkedDependency(node.id,edges);
+          if(!was&&!linked){
+            toast(formatUnlinkedTaskMessage(node.data.label),"warn");
+            clickTimer.current=null;
+            return;
+          }
+          const blockers=getBlockingTasks(node.id,edges,nodes);
+          if(!was&&blockers.length){
+            toast(formatBlockedTaskMessage(blockers),"warn");
+            clickTimer.current=null;
+            return;
+          }
+          await updateDoc(doc(db,"users",user.uid,"nodes",d.id),{"data.completed":!was});
+          toast(was?"Marked as pending":"Completed",was?"info":"success");
+        }
+      } catch (error) {
+        toast("Could not update this task right now. Please try again.", "error");
+      }
+      clickTimer.current=null;
+    },260);
   };
 
   const onEdgeClick=async(_,edge)=>{
@@ -3320,6 +3870,206 @@ export default function App() {
       toast("Board reset","error");
     } catch (error) {
       toast("Could not reset the board right now. Please try again.", "error");
+    }
+  };
+
+  const commitBatchOperations = async operations => {
+    for (let start = 0; start < operations.length; start += FIRESTORE_BATCH_LIMIT) {
+      const batch = writeBatch(db);
+      operations
+        .slice(start, start + FIRESTORE_BATCH_LIMIT)
+        .forEach(applyOperation => applyOperation(batch));
+      await batch.commit();
+    }
+  };
+
+  const mergeNodePositions = useCallback((currentNodes, positionedNodes) => {
+    const positionById = new Map(
+      positionedNodes.map(node => [
+        node.id,
+        {
+          x: node.position?.x ?? 0,
+          y: node.position?.y ?? 0,
+        },
+      ])
+    );
+
+    return currentNodes.map(node => (
+      positionById.has(node.id)
+        ? { ...node, position: positionById.get(node.id) }
+        : node
+    ));
+  }, []);
+
+  const persistNodePositions = useCallback(async (positionedNodes, { silent = false } = {}) => {
+    if (!user || !positionedNodes.length) return false;
+
+    try {
+      const nodeSnapshot = await getDocs(collection(db,"users",user.uid,"nodes"));
+      const nodeRefById = new Map(
+        nodeSnapshot.docs
+          .map(snapshot => [snapshot.data()?.id, snapshot.ref])
+          .filter(([id]) => Boolean(id))
+      );
+
+      const operations = positionedNodes
+        .filter(node => nodeRefById.has(node.id) && hasFiniteNodePosition(node.position))
+        .map(node => batch => batch.update(nodeRefById.get(node.id), {
+          position: {
+            x: node.position.x,
+            y: node.position.y,
+          },
+        }));
+
+      if (!operations.length) return true;
+
+      await commitBatchOperations(operations);
+      return true;
+    } catch (error) {
+      if (!silent) {
+        toast("Could not save node positions right now. Please try again.", "error");
+      }
+      return false;
+    }
+  }, [toast, user]);
+
+  const realignBoard = useCallback(async (nextNodes, nextEdges, { silent = false } = {}) => {
+    const layoutNodesForBoard = computeAutoLayoutNodes(nextNodes, nextEdges, layoutDirection);
+    setNodes(currentNodes => mergeNodePositions(currentNodes, layoutNodesForBoard));
+    await persistNodePositions(layoutNodesForBoard, { silent });
+    return layoutNodesForBoard;
+  }, [layoutDirection, mergeNodePositions, persistNodePositions]);
+
+  const applyLayoutDirection = useCallback(async nextDirection => {
+    const normalizedDirection = VALID_LAYOUT_DIRECTIONS.has(nextDirection) ? nextDirection : "TB";
+    setLayoutDirection(normalizedDirection);
+
+    if (!user || !boardReady || boardError || !nodes.length) {
+      return;
+    }
+
+    const nextLayoutNodes = computeAutoLayoutNodes(nodes, edges, normalizedDirection);
+    setNodes(currentNodes => mergeNodePositions(currentNodes, nextLayoutNodes));
+    await persistNodePositions(nextLayoutNodes, { silent: false });
+  }, [boardError, boardReady, edges, mergeNodePositions, nodes, persistNodePositions, user]);
+
+  useEffect(() => {
+    if (!user || !boardReady || boardError || !nodes.length || !isLegacyBoardLayout(nodes)) {
+      legacyLayoutHydratingRef.current = false;
+      return;
+    }
+
+    if (legacyLayoutHydratingRef.current) return;
+    legacyLayoutHydratingRef.current = true;
+
+    const hydratedNodes = computeAutoLayoutNodes(nodes, edges, layoutDirection);
+    setNodes(currentNodes => mergeNodePositions(currentNodes, hydratedNodes));
+    persistNodePositions(hydratedNodes, { silent: true })
+      .finally(() => {
+        legacyLayoutHydratingRef.current = false;
+      });
+  }, [boardError, boardReady, edges, layoutDirection, mergeNodePositions, nodes, persistNodePositions, user]);
+
+  const exportBoard = () => {
+    if(!ensureBoardReady()) return;
+
+    try {
+      const payload = buildBoardExportPayload({
+        nodes,
+        edges,
+        layoutDirection,
+        exportedBy: formatUserDisplayName(user),
+      });
+      const fileBlob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+      const downloadApi = window.URL || window.webkitURL;
+
+      if (!downloadApi?.createObjectURL) {
+        toast("Board export is not supported in this browser.", "error");
+        return;
+      }
+
+      const downloadUrl = downloadApi.createObjectURL(fileBlob);
+      const link = document.createElement("a");
+      link.href = downloadUrl;
+      link.download = createBoardExportFilename();
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      downloadApi.revokeObjectURL(downloadUrl);
+      toast(`Exported ${payload.nodes.length} task${payload.nodes.length===1?"":"s"} and ${payload.edges.length} dependenc${payload.edges.length===1?"y":"ies"}.`, "success");
+    } catch (error) {
+      toast("Could not export this board right now. Please try again.", "error");
+    }
+  };
+
+  const promptBoardImport = () => {
+    if(!ensureBoardReady()) return;
+    importFileRef.current?.click();
+  };
+
+  const importBoard = async event => {
+    const input = event.target;
+    const file = input?.files?.[0];
+
+    if (!file) return;
+    if (!ensureBoardReady()) {
+      input.value = "";
+      return;
+    }
+
+    try {
+      const importedBoard = parseBoardImportFile(await file.text());
+      const nextTaskCount = importedBoard.nodes.length;
+      const nextDependencyCount = importedBoard.edges.length;
+      const layoutMessage = importedBoard.layoutDirection
+        ? " The saved canvas layout from this file will also be applied."
+        : "";
+      const ok = await confirm({
+        icon: "📥",
+        title: "Import Board",
+        message: `Import "${file.name}" with ${nextTaskCount} task${nextTaskCount===1?"":"s"} and ${nextDependencyCount} dependenc${nextDependencyCount===1?"y":"ies"}? This will replace your current board.${layoutMessage}`,
+        danger: nodes.length > 0 || edges.length > 0,
+        confirmLabel: "Import and Replace",
+      });
+
+      if (!ok) return;
+
+      const [nodeSnapshot, edgeSnapshot] = await Promise.all([
+        getDocs(collection(db,"users",user.uid,"nodes")),
+        getDocs(collection(db,"users",user.uid,"edges")),
+      ]);
+
+      const operations = [
+        ...edgeSnapshot.docs.map(snapshot => batch => batch.delete(snapshot.ref)),
+        ...nodeSnapshot.docs.map(snapshot => batch => batch.delete(snapshot.ref)),
+        ...importedBoard.nodes.map(node => {
+          const nodeRef = doc(collection(db,"users",user.uid,"nodes"));
+          return batch => batch.set(nodeRef, node);
+        }),
+        ...importedBoard.edges.map(edge => {
+          const edgeRef = doc(db,"users",user.uid,"edges",buildDependencyDocId(edge.source, edge.target));
+          return batch => batch.set(edgeRef, edge);
+        }),
+      ];
+
+      await commitBatchOperations(operations);
+
+      if (importedBoard.layoutDirection) {
+        setLayoutDirection(importedBoard.layoutDirection);
+      }
+
+      setParent("");
+      setChild("");
+      setEditTaskId("");
+      setEditTaskName("");
+      setSearch("");
+      setStatusFilter("all");
+
+      toast(`Imported ${nextTaskCount} task${nextTaskCount===1?"":"s"} and ${nextDependencyCount} dependenc${nextDependencyCount===1?"y":"ies"} from "${file.name}".`, "success");
+    } catch (error) {
+      toast(error?.message || "Could not import that board file. Please try again.", "error");
+    } finally {
+      input.value = "";
     }
   };
 
@@ -3413,6 +4163,9 @@ export default function App() {
         haloStroke:"rgba(99,102,241,0.12)",
         arrowStroke:"rgba(51,65,85,0.72)",
       };
+  const miniMapMaskColor = dark ? "rgba(2,6,23,0.48)" : "rgba(238,242,255,0.65)";
+  const miniMapMaskStrokeColor = dark ? "rgba(103,232,249,0.68)" : "rgba(99,102,241,0.18)";
+  const miniMapMaskStrokeWidth = dark ? 2 : 1.4;
 
   // Styled nodes
   const styledNodes=layoutNodes(filteredNodes,filteredEdges,layoutDirection)
@@ -3455,6 +4208,14 @@ export default function App() {
           blockedSummary,
           parents: parents.map(mapDependency),
           children: children.map(mapDependency),
+          onRequestDelete: () => {
+            if (clickTimer.current) {
+              clearTimeout(clickTimer.current);
+              clickTimer.current = null;
+            }
+            deleteNode(n.id, n.data.label);
+          },
+          positionSyncKey: `${Math.round(n.position?.x ?? 0)}:${Math.round(n.position?.y ?? 0)}`,
           sourceHandlePosition: n.sourcePosition || currentLayout.sourcePosition,
           targetHandlePosition: n.targetPosition || currentLayout.targetPosition,
           cardStyle:{
@@ -3493,6 +4254,16 @@ export default function App() {
   const tc=dark?"tgd":"tgl";
   const userDisplayName = formatUserDisplayName(user);
   const userInitial = getUserInitial(user);
+  const panelToggleLabel = isMobileViewport
+    ? (panelCollapsed ? "Show tools" : "Hide tools")
+    : (panelCollapsed ? "Expand sidebar" : "Collapse sidebar");
+  const panelToggleIcon = isMobileViewport
+    ? (panelCollapsed ? "☰" : "✕")
+    : (panelCollapsed ? "❯" : "❮");
+  const panelToggleText = isMobileViewport ? (panelCollapsed ? "Tools" : "Close") : null;
+  const graphFitPadding = isCompactViewport
+    ? CANVAS_VIEWPORT.fitPadding.compact
+    : CANVAS_VIEWPORT.fitPadding.desktop;
 
   /* ══ ROUTING ══ */
   if(route===ROUTES.landing) {
@@ -3571,20 +4342,30 @@ export default function App() {
         <div className="tg-panel-head">
           <div className="tg-brand-row">
             <div className="tg-brand-icon">
-  <svg width="100%" height="100%" viewBox="0 0 36 36" fill="none" style={{position:'absolute',inset:0}}>
+  <svg width="100%" height="100%" viewBox="0 0 52 52" fill="none" style={{position:'absolute',inset:0}}>
     {[
-      {x1:8,y1:11,x2:18,y2:7,d:0},
-      {x1:18,y1:7,x2:28,y2:14,d:0.7},
-      {x1:28,y1:14,x2:18,y2:27,d:1.4},
-      {x1:8,y1:11,x2:18,y2:27,d:2.1},
+      {x1:13,y1:17,x2:26,y2:12,d:0},
+      {x1:26,y1:12,x2:39,y2:21,d:0.7},
+      {x1:39,y1:21,x2:26,y2:40,d:1.4},
+      {x1:13,y1:17,x2:26,y2:40,d:2.1},
     ].map((l,i)=>(
       <line key={i} x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2}
-        stroke="rgba(255,255,255,0.45)" strokeWidth="1.3" strokeLinecap="round"
-        style={{strokeDasharray:22,strokeDashoffset:22,
+        stroke="rgba(255,255,255,0.45)" strokeWidth="1.5" strokeLinecap="round"
+        style={{strokeDasharray:28,strokeDashoffset:28,
           animation:`tlg-draw 2.8s ease-in-out ${l.d}s infinite`}}/>
     ))}
-    {[{cx:8,cy:11,r:2.2},{cx:18,cy:7,r:2.2},{cx:28,cy:14,r:2.2},{cx:18,cy:27,r:2.8}].map((c,i)=>(
-      <circle key={i} cx={c.cx} cy={c.cy} r={c.r} fill="white" opacity="0.9"/>
+    {[{cx:13,cy:17,r:3},{cx:26,cy:12,r:3},{cx:39,cy:21,r:3},{cx:26,cy:40,r:3.8}].map((c,i)=>(
+      <circle
+        key={i}
+        cx={c.cx}
+        cy={c.cy}
+        r={c.r}
+        fill="white"
+        style={{
+          opacity: 0.9,
+          animation: `tlg-draw 2.8s ease-in-out ${i * 0.5}s infinite`,
+        }}
+      />
     ))}
   </svg>
 </div>
@@ -3597,11 +4378,13 @@ export default function App() {
             <button
               className="tg-icon-btn tg-collapse-btn"
               onClick={()=>setPanelCollapsed(v=>!v)}
-              title={panelCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-              aria-label={panelCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+              title={panelToggleLabel}
+              aria-label={panelToggleLabel}
               aria-expanded={!panelCollapsed}
+              aria-controls="tg-panel-body"
             >
-              <span className="tg-collapse-icon">{panelCollapsed ? "❯" : "❮"}</span>
+              <span className="tg-collapse-icon">{panelToggleIcon}</span>
+              {panelToggleText && <span className="tg-collapse-label">{panelToggleText}</span>}
             </button>
             <button className="tg-icon-btn" onClick={()=>setDark(d=>!d)} title="Toggle theme">
               {dark?"☀️":"🌙"}
@@ -3641,7 +4424,7 @@ export default function App() {
         )}
 
         {/* Body */}
-        <div className="tg-panel-body">
+        <div className="tg-panel-body" id="tg-panel-body">
 
           {/* Stats */}
           <div className="tg-stats">
@@ -3709,7 +4492,7 @@ export default function App() {
                   key={option.value}
                   type="button"
                   className={`tg-layout-btn ${layoutDirection===option.value ? "tg-layout-btn--active" : ""}`}
-                  onClick={()=>setLayoutDirection(option.value)}
+                  onClick={()=>applyLayoutDirection(option.value)}
                   aria-pressed={layoutDirection===option.value}
                   title={option.label}
                 >
@@ -3782,6 +4565,9 @@ export default function App() {
               disabled={!parent||!child||parent===child||!boardSyncActive}>
               Link Tasks →
             </button>
+            <div className="tg-section-note">
+              You can also drag from a task handle directly onto another task on the graph to create the same dependency instantly.
+            </div>
           </div>
 
 
@@ -3845,13 +4631,48 @@ export default function App() {
             )}
           </div>
 
+          <div className="tg-section">
+            <div className="tg-sec-label">Board Data</div>
+            <div className="tg-btn-row">
+              <button
+                className="tg-btn tg-btn-secondary"
+                onClick={exportBoard}
+                disabled={!boardSyncActive}
+                type="button"
+              >
+                ⤓ Export JSON
+              </button>
+              <button
+                className="tg-btn tg-btn-primary"
+                onClick={promptBoardImport}
+                disabled={!boardSyncActive}
+                type="button"
+              >
+                ⤒ Import JSON
+              </button>
+            </div>
+            <div className="tg-section-note">
+              Export saves your current tasks, dependencies, and canvas layout. Import replaces the current board with a validated TaskGraph JSON file.
+            </div>
+            <input
+              ref={importFileRef}
+              className="tg-import-file"
+              type="file"
+              accept=".json,application/json"
+              onChange={importBoard}
+              aria-hidden="true"
+              tabIndex={-1}
+            />
+          </div>
+
                   {/* Hints */}
           <div className="tg-hints">
             <b>Hover</b> node → see dependencies<br/>
             <b>Click</b> node → toggle complete<br/>
             <b>Double-click</b> node → delete task<br/>
             <b>Click edge</b> → remove link<br/>
-            <b>Use panel</b> → edit task name and change flow direction
+            <b>Drag handle</b> → connect tasks directly on the graph<br/>
+            <b>Use panel</b> → edit task name, change flow direction, and move board data
           </div>
 
           {/* Reset */}
@@ -3908,10 +4729,17 @@ export default function App() {
             },
           }))}
           onNodeClick={onNodeClick}
+          onNodesChange={onNodesChange}
+          onNodeDragStart={onNodeDragStart}
+          onNodeDragStop={onNodeDragStop}
           onEdgeClick={onEdgeClick}
+          onConnect={onConnect}
+          onConnectStart={onConnectStart}
+          onConnectEnd={onConnectEnd}
           onInit={instance=>{flowRef.current=instance;setTimeout(()=>fitGraph(350),0);}}
           fitView
-          fitViewOptions={{padding:CANVAS_VIEWPORT.fitPadding.desktop}}
+          fitViewOptions={{padding:graphFitPadding}}
+          connectionLineComponent={DependencyConnectionLine}
           minZoom={CANVAS_VIEWPORT.minZoom}
           maxZoom={CANVAS_VIEWPORT.maxZoom}
           nodesDraggable={canvasInteractive}
@@ -3921,12 +4749,15 @@ export default function App() {
           zoomOnScroll={canvasInteractive}
           zoomOnPinch={canvasInteractive}
           zoomOnDoubleClick={false}
+          connectOnClick={false}
           onlyRenderVisibleElements
           proOptions={{hideAttribution:true}}
         >
           <MiniMap
             nodeColor={n=>n.data?.completed?statusColors.complete:isBlocked(n.id,edges,nodes)?statusColors.blocked:statusColors.pending}
-            maskColor={dark?"rgba(3,11,26,0.65)":"rgba(238,242,255,0.65)"}
+            maskColor={miniMapMaskColor}
+            maskStrokeColor={miniMapMaskStrokeColor}
+            maskStrokeWidth={miniMapMaskStrokeWidth}
           />
           <Controls onInteractiveChange={setCanvasInteractive}/>
           <Background color={dark?"rgba(0,212,255,0.08)":"rgba(148,163,184,0.18)"} gap={176} size={1.15}/>

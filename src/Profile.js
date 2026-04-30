@@ -6,8 +6,12 @@ import {
   updateProfile,
 } from "firebase/auth";
 import { auth } from "./firebase";
+import { getPasswordStrength, PASSWORD_MIN_LENGTH } from "./authValidation";
 import { AuthLogo, AuthShell, useAuthStyles } from "./Login";
 import { formatUserDisplayName, getUserInitial } from "./userDisplay";
+
+const STRENGTH_CLS = ["", "s-weak", "s-fair", "s-good", "s-strong"];
+const STRENGTH_LABEL_CLS = ["", "s-label-weak", "s-label-fair", "s-label-good", "s-label-strong"];
 
 const PROFILE_CSS = `
 .profile-auth-wrap {
@@ -400,6 +404,12 @@ const PROFILE_CSS = `
   font-weight: 600;
   line-height: 1.55;
 }
+.profile-password-field .auth-field-msg {
+  margin-top: 8px;
+}
+.profile-password-strength {
+  margin-top: 6px;
+}
 .dark .profile-note {
   color: #64748b;
 }
@@ -524,10 +534,14 @@ export default function Profile({ user, onBack, onProfileUpdated, darkTheme, set
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [savingName, setSavingName] = useState(false);
   const [savingPassword, setSavingPassword] = useState(false);
+  const passwordStrength = newPassword ? getPasswordStrength(newPassword) : null;
+  const confirmPasswordMismatch = Boolean(confirmPassword) && newPassword !== confirmPassword;
 
   useEffect(() => {
     const existing = document.getElementById("tg-profile-css");
@@ -593,9 +607,9 @@ export default function Profile({ user, onBack, onProfileUpdated, darkTheme, set
       setError("Fill in your current password and new password first.");
       return;
     }
-    if (newPassword.length < 6) {
+    if (newPassword.length < PASSWORD_MIN_LENGTH) {
       setSuccess("");
-      setError("New password must be at least 6 characters.");
+      setError(`New password must be at least ${PASSWORD_MIN_LENGTH} characters.`);
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -717,22 +731,24 @@ export default function Profile({ user, onBack, onProfileUpdated, darkTheme, set
 
             <div className="auth-fields">
               <div className="auth-field">
-                <span className="auth-field-icon">👤</span>
-                <input
-                  className="auth-input"
-                  type="text"
-                  placeholder="Display name"
-                  value={displayName}
-                  onChange={event => {
-                    setDisplayName(event.target.value);
-                    clearMessages();
-                  }}
-                  onKeyDown={event => {
-                    if (event.key === "Enter") handleNameSave();
-                  }}
-                  autoComplete="name"
-                />
-                <div className="auth-field-line" />
+                <div className="auth-input-row">
+                  <span className="auth-field-icon">👤</span>
+                  <input
+                    className="auth-input"
+                    type="text"
+                    placeholder="Display name"
+                    value={displayName}
+                    onChange={event => {
+                      setDisplayName(event.target.value);
+                      clearMessages();
+                    }}
+                    onKeyDown={event => {
+                      if (event.key === "Enter") handleNameSave();
+                    }}
+                    autoComplete="name"
+                  />
+                  <div className="auth-field-line" />
+                </div>
               </div>
             </div>
 
@@ -756,55 +772,107 @@ export default function Profile({ user, onBack, onProfileUpdated, darkTheme, set
             </div>
 
             <div className="auth-fields">
-              <div className="auth-field">
-                <span className="auth-field-icon">🔒</span>
-                <input
-                  className="auth-input"
-                  type="password"
-                  placeholder="Current password"
-                  value={currentPassword}
-                  onChange={event => {
-                    setCurrentPassword(event.target.value);
-                    clearMessages();
-                  }}
-                  onKeyDown={onPasswordKeyDown}
-                  autoComplete="current-password"
-                />
-                <div className="auth-field-line" />
+              <div className="auth-field profile-password-field">
+                <div className="auth-input-row">
+                  <span className="auth-field-icon">🔒</span>
+                  <input
+                    className="auth-input"
+                    type="password"
+                    placeholder="Current password"
+                    value={currentPassword}
+                    onChange={event => {
+                      setCurrentPassword(event.target.value);
+                      clearMessages();
+                    }}
+                    onKeyDown={onPasswordKeyDown}
+                    autoComplete="current-password"
+                  />
+                  <div className="auth-field-line" />
+                </div>
+                <div className="auth-field-msg">
+                  Enter your current password to authorize this change.
+                </div>
               </div>
 
-              <div className="auth-field">
-                <span className="auth-field-icon">✨</span>
-                <input
-                  className="auth-input"
-                  type="password"
-                  placeholder="New password"
-                  value={newPassword}
-                  onChange={event => {
-                    setNewPassword(event.target.value);
-                    clearMessages();
-                  }}
-                  onKeyDown={onPasswordKeyDown}
-                  autoComplete="new-password"
-                />
-                <div className="auth-field-line" />
+              <div className="auth-field profile-password-field">
+                <div className="auth-input-row">
+                  <span className="auth-field-icon">✨</span>
+                  <input
+                    className="auth-input has-toggle"
+                    type={showNewPassword ? "text" : "password"}
+                    placeholder="New password"
+                    value={newPassword}
+                    onChange={event => {
+                      setNewPassword(event.target.value);
+                      clearMessages();
+                    }}
+                    onKeyDown={onPasswordKeyDown}
+                    autoComplete="new-password"
+                  />
+                  <button
+                    type="button"
+                    className="auth-pw-toggle"
+                    onClick={() => setShowNewPassword(value => !value)}
+                    tabIndex={-1}
+                    aria-label={showNewPassword ? "Hide new password" : "Show new password"}
+                  >
+                    {showNewPassword ? "Hide" : "Show"}
+                  </button>
+                  <div className="auth-field-line" />
+                </div>
+                <div className="auth-field-msg">
+                  {`Use at least ${PASSWORD_MIN_LENGTH} characters. A mix of letters, numbers, and symbols is recommended.`}
+                </div>
+                {passwordStrength && (
+                  <div className="auth-strength profile-password-strength">
+                    <div className="auth-strength-bar">
+                      {[1, 2, 3, 4].map(index => (
+                        <div
+                          key={index}
+                          className={`auth-strength-seg ${index <= passwordStrength.level ? STRENGTH_CLS[passwordStrength.level] : ""}`}
+                        />
+                      ))}
+                    </div>
+                    <span className={`auth-strength-label ${STRENGTH_LABEL_CLS[passwordStrength.level]}`}>
+                      {passwordStrength.label} password
+                    </span>
+                  </div>
+                )}
               </div>
 
-              <div className="auth-field">
-                <span className="auth-field-icon">✅</span>
-                <input
-                  className="auth-input"
-                  type="password"
-                  placeholder="Confirm new password"
-                  value={confirmPassword}
-                  onChange={event => {
-                    setConfirmPassword(event.target.value);
-                    clearMessages();
-                  }}
-                  onKeyDown={onPasswordKeyDown}
-                  autoComplete="new-password"
-                />
-                <div className="auth-field-line" />
+              <div className="auth-field profile-password-field">
+                <div className="auth-input-row">
+                  <span className="auth-field-icon">✅</span>
+                  <input
+                    className="auth-input has-toggle"
+                    type={showConfirmPassword ? "text" : "password"}
+                    placeholder="Confirm new password"
+                    value={confirmPassword}
+                    onChange={event => {
+                      setConfirmPassword(event.target.value);
+                      clearMessages();
+                    }}
+                    onKeyDown={onPasswordKeyDown}
+                    autoComplete="new-password"
+                  />
+                  <button
+                    type="button"
+                    className="auth-pw-toggle"
+                    onClick={() => setShowConfirmPassword(value => !value)}
+                    tabIndex={-1}
+                    aria-label={showConfirmPassword ? "Hide confirm password" : "Show confirm password"}
+                  >
+                    {showConfirmPassword ? "Hide" : "Show"}
+                  </button>
+                  <div className="auth-field-line" />
+                </div>
+                {confirmPassword && (
+                  <div className={`auth-field-msg ${confirmPasswordMismatch ? "is-error" : ""}`.trim()}>
+                    {confirmPasswordMismatch
+                      ? "This confirmation does not match your new password yet."
+                      : "New password confirmed."}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -819,7 +887,7 @@ export default function Profile({ user, onBack, onProfileUpdated, darkTheme, set
             </div>
 
             <div className="profile-note">
-              Use at least 6 characters. If Firebase asks for a recent sign-in, simply log in again and retry.
+              {`Use at least ${PASSWORD_MIN_LENGTH} characters. If Firebase asks for a recent sign-in, simply log in again and retry.`}
             </div>
           </div>
         </div>
