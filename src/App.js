@@ -3933,13 +3933,6 @@ export default function App() {
     }
   }, [toast, user]);
 
-  const realignBoard = useCallback(async (nextNodes, nextEdges, { silent = false } = {}) => {
-    const layoutNodesForBoard = computeAutoLayoutNodes(nextNodes, nextEdges, layoutDirection);
-    setNodes(currentNodes => mergeNodePositions(currentNodes, layoutNodesForBoard));
-    await persistNodePositions(layoutNodesForBoard, { silent });
-    return layoutNodesForBoard;
-  }, [layoutDirection, mergeNodePositions, persistNodePositions]);
-
   const applyLayoutDirection = useCallback(async nextDirection => {
     const normalizedDirection = VALID_LAYOUT_DIRECTIONS.has(nextDirection) ? nextDirection : "TB";
     setLayoutDirection(normalizedDirection);
