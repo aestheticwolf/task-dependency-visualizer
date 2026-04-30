@@ -1,6 +1,12 @@
 import React, { useState, useEffect, useRef } from "react";
 import { auth } from "./firebase";
-import { signInWithEmailAndPassword } from "firebase/auth";
+import { sendPasswordResetEmail, signInWithEmailAndPassword } from "firebase/auth";
+import {
+  formatAuthMessage,
+  hasValidationErrors,
+  validateEmailAddress,
+  validateLoginForm,
+} from "./authValidation";
 
 /* ═══════════════════════════════════════════════════════
    CSS
@@ -345,6 +351,16 @@ const CSS = `
   color: #fca5a5;
 }
 .light .auth-err { color: #b91c1c; background: rgba(239,68,68,0.07); border-color: rgba(239,68,68,0.2); }
+.auth-err.is-success {
+  background: rgba(16,185,129,0.11);
+  border-color: rgba(16,185,129,0.28);
+  color: #86efac;
+}
+.light .auth-err.is-success {
+  color: #047857;
+  background: rgba(16,185,129,0.09);
+  border-color: rgba(16,185,129,0.22);
+}
 @keyframes auth-err-in {
   from { opacity: 0; transform: translateY(-12px) scale(0.97); }
   to   { opacity: 1; transform: translateY(0) scale(1); }
@@ -357,6 +373,9 @@ const CSS = `
 .auth-field  {
   position: relative;
   animation: auth-field-in 0.5s cubic-bezier(0.16,1,0.3,1) both;
+}
+.auth-input-row {
+  position: relative;
 }
 .auth-field:nth-child(1) { animation-delay: 0.1s; }
 .auth-field:nth-child(2) { animation-delay: 0.18s; }
@@ -372,7 +391,7 @@ const CSS = `
   transition: transform 0.2s;
 }
 /* Icon floats up slightly on focus */
-.auth-field:focus-within .auth-field-icon {
+.auth-input-row:focus-within .auth-field-icon {
   transform: translateY(-55%);
 }
 
@@ -416,20 +435,67 @@ const CSS = `
   transition: transform 0.3s cubic-bezier(0.4,0,0.2,1);
   pointer-events: none;
 }
-.auth-field:focus-within .auth-field-line { transform: scaleX(1); }
+.auth-input-row:focus-within .auth-field-line { transform: scaleX(1); }
+.auth-field-msg {
+  margin-top: 8px;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.dark .auth-field-msg { color: #64748b; }
+.light .auth-field-msg { color: #94a3b8; }
+.auth-field-msg.is-error { color: #fca5a5; }
+.light .auth-field-msg.is-error { color: #b91c1c; }
+.auth-field-meta {
+  flex: 1;
+  min-height: 20px;
+}
+.auth-inline-actions {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+.auth-inline-actions .auth-field-msg {
+  margin-top: 0;
+}
+.auth-text-btn {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.2s ease;
+}
+.dark .auth-text-btn { color: #00d4ff; }
+.light .auth-text-btn { color: #7c3aed; }
+.auth-text-btn:hover:not(:disabled) { opacity: 0.8; }
+.auth-text-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 
 /* ══════════════════════════════
    SHOW / HIDE PASSWORD
 ══════════════════════════════ */
 .auth-pw-toggle {
-  position: absolute; right: 14px; top: 50%;
+  position: absolute; right: 10px; top: 50%;
   transform: translateY(-50%);
   border: none; background: transparent;
   cursor: pointer; z-index: 2;
-  padding: 4px 6px;
+  min-width: 58px;
+  height: calc(100% - 10px);
+  padding: 0 10px;
   border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
   font-family: 'Open Sans', sans-serif;
   font-size: 11px; font-weight: 700; letter-spacing: 0.5px;
+  line-height: 1;
+  text-align: center;
   text-transform: uppercase;
   transition: all 0.18s ease;
 }
@@ -444,7 +510,7 @@ const CSS = `
   background: rgba(124,58,237,0.07);
 }
 /* Input with toggle needs right padding increased */
-.auth-input.has-toggle { padding-right: 68px; }
+.auth-input.has-toggle { padding-right: 88px; }
 
 /* ══════════════════════════════
    STRENGTH BAR (signup only)
@@ -621,6 +687,8 @@ const CSS = `
   .auth-input { padding: 12px 40px 12px 40px; }
   .auth-pw-toggle { right: 12px; font-size: 11px; }
   .auth-field-icon { left: 14px; font-size: 13px; }
+  .auth-inline-actions { flex-direction: column; gap: 8px; }
+  .auth-field-meta { min-height: 0; }
 }
 /* ── Animated logo SVG ── */
 @keyframes tlg-draw {
@@ -832,26 +900,67 @@ export default function Login({ onModeChange, onAuthSuccess, onBack, darkTheme, 
   const [password, setPassword] = useState("");
   const [showPw,   setShowPw]   = useState(false);
   const [loading,  setLoading]  = useState(false);
-  const [error,    setError]    = useState("");
+  const [resetting, setResetting] = useState(false);
+  const [feedback, setFeedback] = useState(null);
+  const [fieldErrors, setFieldErrors] = useState({ email: "", password: "" });
   useAuthStyles();
   const dark = Boolean(darkTheme);
   const setDark = setDarkTheme;
+  const busy = loading || resetting;
 
   const handleAuth = async () => {
-    if (!email || !password) return;
-    setLoading(true); setError("");
+    const trimmedEmail = email.trim();
+    const nextErrors = validateLoginForm({ email: trimmedEmail, password });
+
+    setFieldErrors(nextErrors);
+    setFeedback(null);
+
+    if (hasValidationErrors(nextErrors)) {
+      return;
+    }
+
+    setLoading(true);
+    setEmail(trimmedEmail);
     try {
-      const res = await signInWithEmailAndPassword(auth, email, password);
+      const res = await signInWithEmailAndPassword(auth, trimmedEmail, password);
       onAuthSuccess?.(res.user);
     } catch (err) {
-      setError(err.message.replace("Firebase: ", "").replace(/\(auth\/.*?\)\.?/g, "").trim());
+      setFeedback({ type: "error", message: formatAuthMessage(err, "login") });
     } finally {
       setLoading(false);
     }
   };
 
+  const handlePasswordReset = async () => {
+    const trimmedEmail = email.trim();
+    const emailError = validateEmailAddress(trimmedEmail);
+
+    setFeedback(null);
+    setFieldErrors(prev => ({ ...prev, email: emailError }));
+
+    if (emailError) {
+      return;
+    }
+
+    setResetting(true);
+    setEmail(trimmedEmail);
+
+    try {
+      await sendPasswordResetEmail(auth, trimmedEmail);
+      setFeedback({
+        type: "success",
+        message: "If an account exists for this email, a password reset link has been sent. Check your inbox and spam folder.",
+      });
+    } catch (err) {
+      setFeedback({ type: "error", message: formatAuthMessage(err, "passwordReset") });
+    } finally {
+      setResetting(false);
+    }
+  };
+
   const goToSignup = () => {
-    setError("");
+    setFeedback(null);
+    setFieldErrors({ email: "", password: "" });
     setShowPw(false);
     onModeChange?.("signup");
   };
@@ -866,59 +975,119 @@ export default function Login({ onModeChange, onAuthSuccess, onBack, darkTheme, 
         onSelectSignup={goToSignup}
       />
 
-      {error && (
-        <div className="auth-err">
-          <span>⚠️</span>
-          <span>{error}</span>
+      {feedback?.message && (
+        <div
+          className={`auth-err ${feedback.type === "success" ? "is-success" : ""}`.trim()}
+          role={feedback.type === "error" ? "alert" : "status"}
+          aria-live="polite"
+        >
+          <span>{feedback.type === "success" ? "OK" : "!"}</span>
+          <span>{feedback.message}</span>
         </div>
       )}
 
       <div className="auth-fields">
         <div className="auth-field">
-          <span className="auth-field-icon">✉️</span>
-          <input
-            className="auth-input"
-            type="email"
-            placeholder="Email address"
-            value={email}
-            onChange={e => { setEmail(e.target.value); setError(""); }}
-            onKeyDown={onKey}
-            autoComplete="email"
-          />
-          <div className="auth-field-line" />
+          <div className="auth-input-row">
+            <span className="auth-field-icon">✉️</span>
+            <input
+              className="auth-input"
+              type="email"
+              placeholder="Email address"
+              value={email}
+              onChange={e => {
+                const nextEmail = e.target.value;
+                setEmail(nextEmail);
+                setFeedback(null);
+                setFieldErrors(prev =>
+                  prev.email ? { ...prev, email: validateEmailAddress(nextEmail.trim()) } : prev
+                );
+              }}
+              onBlur={() =>
+                setFieldErrors(prev => ({ ...prev, email: validateEmailAddress(email.trim()) }))
+              }
+              onKeyDown={onKey}
+              autoComplete="email"
+              aria-invalid={Boolean(fieldErrors.email)}
+              aria-describedby={fieldErrors.email ? "login-email-error" : undefined}
+            />
+            <div className="auth-field-line" />
+          </div>
+          {fieldErrors.email && (
+            <div id="login-email-error" className="auth-field-msg is-error">
+              {fieldErrors.email}
+            </div>
+          )}
         </div>
 
         <div className="auth-field">
-          <span className="auth-field-icon">🔑</span>
-          <input
-            className="auth-input has-toggle"
-            type={showPw ? "text" : "password"}
-            placeholder="Password"
-            value={password}
-            onChange={e => { setPassword(e.target.value); setError(""); }}
-            onKeyDown={onKey}
-            autoComplete="current-password"
-          />
-          <button
-            type="button"
-            className="auth-pw-toggle"
-            onClick={() => setShowPw(v => !v)}
-            tabIndex={-1}
-            aria-label={showPw ? "Hide password" : "Show password"}
-          >
-            {showPw ? "Hide" : "Show"}
-          </button>
-          <div className="auth-field-line" />
+          <div className="auth-input-row">
+            <span className="auth-field-icon">🔑</span>
+            <input
+              className="auth-input has-toggle"
+              type={showPw ? "text" : "password"}
+              placeholder="Password"
+              value={password}
+              onChange={e => {
+                const nextPassword = e.target.value;
+                setPassword(nextPassword);
+                setFeedback(null);
+                setFieldErrors(prev =>
+                  prev.password
+                    ? { ...prev, password: validateLoginForm({ email: email.trim(), password: nextPassword }).password }
+                    : prev
+                );
+              }}
+              onBlur={() =>
+                setFieldErrors(prev => ({
+                  ...prev,
+                  password: validateLoginForm({ email: email.trim(), password }).password,
+                }))
+              }
+              onKeyDown={onKey}
+              autoComplete="current-password"
+              aria-invalid={Boolean(fieldErrors.password)}
+              aria-describedby={fieldErrors.password ? "login-password-error" : undefined}
+            />
+            <button
+              type="button"
+              className="auth-pw-toggle"
+              onClick={() => setShowPw(v => !v)}
+              tabIndex={-1}
+              aria-label={showPw ? "Hide password" : "Show password"}
+            >
+              {showPw ? "Hide" : "Show"}
+            </button>
+            <div className="auth-field-line" />
+          </div>
+          <div className="auth-inline-actions">
+            <div className="auth-field-meta">
+              {fieldErrors.password && (
+                <div id="login-password-error" className="auth-field-msg is-error">
+                  {fieldErrors.password}
+                </div>
+              )}
+            </div>
+            <button
+              type="button"
+              className="auth-text-btn"
+              onClick={handlePasswordReset}
+              disabled={busy}
+            >
+              {resetting ? "Sending reset link..." : "Forgot password?"}
+            </button>
+          </div>
         </div>
       </div>
 
       <button
+        type="button"
         className="auth-btn m-login"
         onClick={handleAuth}
-        disabled={!email || !password || loading}
+        disabled={busy}
       >
         {loading && <span className="auth-spinner" />}
-        {loading ? "Please wait…" : "Sign In  →"}
+        {loading ? "Please wait..." : "Sign In  →"}
       </button>
 
       <p className="auth-footer">

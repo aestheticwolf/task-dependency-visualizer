@@ -40,24 +40,173 @@ export function hasLinkedDependency(id, edges) {
   return edges.some((edge) => edge.source === id || edge.target === id);
 }
 
+export function buildDependencyEdgeId(sourceId, targetId) {
+  return `e${sourceId}-${targetId}`;
+}
+
+export function buildDependencyDocId(sourceId, targetId) {
+  return `${sourceId}__${targetId}`;
+}
+
+export function validateDependencyLink({ sourceId, targetId, nodes, edges }) {
+  if (!sourceId || !targetId) {
+    return {
+      code: "missing-selection",
+      type: "warn",
+      message: "Select both parent and child tasks before linking them.",
+    };
+  }
+
+  if (sourceId === targetId) {
+    return {
+      code: "self-link",
+      type: "warn",
+      message: "A task cannot depend on itself. Choose two different tasks.",
+    };
+  }
+
+  const nodeIds = new Set((nodes || []).map((node) => node?.id).filter(Boolean));
+  if (!nodeIds.has(sourceId) || !nodeIds.has(targetId)) {
+    return {
+      code: "missing-task",
+      type: "warn",
+      message: "One or both selected tasks no longer exist. Refresh the task list and try again.",
+    };
+  }
+
+  if ((edges || []).some((edge) => edge.source === sourceId && edge.target === targetId)) {
+    return {
+      code: "duplicate",
+      type: "warn",
+      message: "Dependency already exists.",
+    };
+  }
+
+  const nextEdge = {
+    id: buildDependencyEdgeId(sourceId, targetId),
+    source: sourceId,
+    target: targetId,
+  };
+
+  if (hasCycle(buildGraph([...(edges || []), nextEdge]))) {
+    return {
+      code: "cycle",
+      type: "error",
+      message: "Circular dependency detected. Choose a different task relationship.",
+    };
+  }
+
+  return null;
+}
+
 export function formatBlockedTaskMessage(blockers) {
   if (!blockers.length) {
     return "This task cannot be completed until its linked prerequisites are ready.";
   }
 
+  const blockerList = formatBlockingTaskNames(blockers);
+
   if (blockers.length === 1) {
-    return `This task cannot be completed yet because the linked prerequisite "${blockers[0].data.label}" is still pending.`;
+    return `This task cannot be completed yet because the linked prerequisite ${blockerList} is still pending.`;
   }
 
-  return `This task cannot be completed yet because ${blockers.length} linked prerequisite tasks are still pending.`;
+  return `This task cannot be completed yet because the linked prerequisites ${blockerList} are still pending.`;
 }
 
 export function formatUnlinkedTaskMessage(label) {
   return `Link a dependency to "${label}" before marking it complete.`;
 }
 
+export function formatBlockedTaskSummary(blockers) {
+  if (!blockers.length) {
+    return null;
+  }
+
+  if (blockers.length === 1) {
+    return `Waiting on ${formatBlockingTaskNames(blockers)} to be completed.`;
+  }
+
+  return `Waiting on ${formatBlockingTaskNames(blockers)} to be completed before this task can start.`;
+}
+
 export function isBlocked(id, edges, nodes) {
   return getBlockingTasks(id, edges, nodes).length > 0;
+}
+
+export function getTaskWorkflowStatus(node, edges, nodes) {
+  if (!node) {
+    return "unknown";
+  }
+
+  if (node.data.completed) {
+    return "complete";
+  }
+
+  if (!hasLinkedDependency(node.id, edges)) {
+    return "unlinked";
+  }
+
+  if (isBlocked(node.id, edges, nodes)) {
+    return "blocked";
+  }
+
+  return "ready";
+}
+
+export function matchesTaskViewFilter(node, edges, nodes, filterId = "all") {
+  if (filterId === "all") {
+    return true;
+  }
+
+  const status = getTaskWorkflowStatus(node, edges, nodes);
+  if (filterId === "open") {
+    return status === "ready";
+  }
+
+  return status === filterId;
+}
+
+export function matchesTaskSearch(node, query = "") {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  return node.data.label.toLowerCase().includes(normalizedQuery);
+}
+
+export function getTaskStatusSummary(nodes = [], edges = []) {
+  return nodes.reduce((summary, node) => {
+    const status = getTaskWorkflowStatus(node, edges, nodes);
+
+    summary.total += 1;
+    if (status === "complete") {
+      summary.completed += 1;
+    } else {
+      summary.pending += 1;
+    }
+
+    if (status === "blocked") {
+      summary.blocked += 1;
+    }
+
+    if (status === "ready") {
+      summary.ready += 1;
+    }
+
+    if (status === "unlinked") {
+      summary.unlinked += 1;
+    }
+
+    return summary;
+  }, {
+    total: 0,
+    completed: 0,
+    pending: 0,
+    blocked: 0,
+    ready: 0,
+    unlinked: 0,
+  });
 }
 
 export function getPendingTaskBlockMessage(id, edges, nodes) {
@@ -89,11 +238,16 @@ export function getTaskDependencies(id, edges, nodes) {
 export function formatTooltipContent(node, edges, nodes) {
   const { parents, children } = getTaskDependencies(node.id, edges, nodes);
   const { completed, label } = node.data;
+  const blockers = getBlockingTasks(node.id, edges, nodes);
+  const blockedSummary = formatBlockedTaskSummary(blockers);
 
   let tooltip = `<b>${label}</b><br/>`;
 
   if (completed) tooltip += "✓ Completed<br/>";
-  else if (isBlocked(node.id, edges, nodes)) tooltip += "🔒 Blocked<br/>";
+  else if (blockers.length) {
+    tooltip += "🔒 Blocked<br/>";
+    if (blockedSummary) tooltip += `${blockedSummary}<br/>`;
+  }
   else tooltip += "⚪ Ready<br/>";
 
   if (parents.length) {
@@ -111,4 +265,22 @@ export function formatTooltipContent(node, edges, nodes) {
   }
 
   return tooltip;
+}
+
+function formatBlockingTaskNames(blockers) {
+  const labels = blockers.map((blocker) => `"${blocker.data.label}"`);
+
+  if (!labels.length) {
+    return "the linked prerequisites";
+  }
+
+  if (labels.length === 1) {
+    return labels[0];
+  }
+
+  if (labels.length === 2) {
+    return `${labels[0]} and ${labels[1]}`;
+  }
+
+  return `${labels[0]}, ${labels[1]}, and ${labels.length - 2} more`;
 }

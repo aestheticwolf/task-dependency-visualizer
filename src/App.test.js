@@ -39,6 +39,23 @@ test("returns a professional blocked message for pending linked prerequisites", 
   );
 });
 
+test("lists multiple pending prerequisites in blocked feedback", () => {
+  const blockedNodes = [
+    ...nodes,
+    { id: "4", data: { label: "Security Review", completed: false } },
+    { id: "5", data: { label: "Release Notes", completed: false } },
+  ];
+  const blockedEdges = [
+    ...edges,
+    { id: "e4-3", source: "4", target: "3" },
+    { id: "e5-3", source: "5", target: "3" },
+  ];
+
+  expect(getPendingTaskBlockMessage("3", blockedEdges, blockedNodes)).toBe(
+    'This task cannot be completed yet because the linked prerequisites "Security Review" and "Release Notes" are still pending.'
+  );
+});
+
 test("keeps ready tasks available when they are not blocked", () => {
   expect(isBlocked("3", edges, nodes)).toBe(false);
   expect(getBlockingTasks("3", edges, nodes)).toEqual([]);

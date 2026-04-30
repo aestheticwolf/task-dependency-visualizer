@@ -8,20 +8,27 @@ import Login from "./Login";
 import Signup from "./Signup";
 import Landing from "./Landing";
 import Profile from "./Profile";
+import { buildWelcomeBanner } from "./welcomeGreeting";
 import {
-  buildGraph,
+  buildDependencyDocId,
+  buildDependencyEdgeId,
   formatBlockedTaskMessage,
+  formatBlockedTaskSummary,
   formatUnlinkedTaskMessage,
   getBlockingTasks,
+  getTaskStatusSummary,
   getTaskDependencies,
-  hasCycle,
+  getTaskWorkflowStatus,
   hasLinkedDependency,
   isBlocked,
+  matchesTaskSearch,
+  matchesTaskViewFilter,
+  validateDependencyLink,
 } from "./taskLogic";
 import { formatUserDisplayName, getUserInitial } from "./userDisplay";
 import {
   collection, addDoc, getDocs, deleteDoc,
-  doc, onSnapshot, updateDoc,
+  doc, onSnapshot, runTransaction, updateDoc,
 } from "firebase/firestore";
 import { MiniMap, Controls, Background, Handle, Position, useNodeId, useUpdateNodeInternals } from "reactflow";
 
@@ -399,34 +406,119 @@ button, input, select, textarea {
   width: 100%;
 }
 .tg-logout-btn {
-  display: flex; align-items: center; gap: 6px;
+  position: relative;
+  overflow: hidden;
+  display: flex; align-items: center; gap: 8px;
   justify-content: center;
-  min-width: 0; height: 36px; flex: 1;
-  padding: 0 12px; border-radius: 10px;
-  border: 1px solid rgba(239,68,68,0.2);
-  background: rgba(239,68,68,0.06);
-  color: #f87171;
+  min-width: 0; height: 38px; flex: 1;
+  padding: 0 14px 0 10px; border-radius: 12px;
   font-family: 'Open Sans', sans-serif;
-  font-size: 12.5px; font-weight: 800;
+  font-size: 12.5px; font-weight: 700;
   line-height: 1; white-space: nowrap;
-  cursor: pointer; transition: all 0.2s;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s, border-color 0.2s, background 0.2s, color 0.2s;
+}
+.tgd .tg-logout-btn {
+  border: 1px solid rgba(248,113,113,0.24);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.08), transparent 56%),
+    linear-gradient(135deg, rgba(127,29,29,0.2), rgba(69,10,10,0.32));
+  color: #fda4af;
+  box-shadow:
+    0 12px 28px rgba(69,10,10,0.28),
+    inset 0 1px 0 rgba(255,255,255,0.12);
+}
+.tgl .tg-logout-btn {
+  border: 1px solid rgba(239,68,68,0.18);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.6), transparent 56%),
+    linear-gradient(135deg, rgba(255,241,242,0.98), rgba(255,228,230,0.92));
+  color: #dc2626;
+  box-shadow:
+    0 10px 24px rgba(248,113,113,0.14),
+    inset 0 1px 0 rgba(255,255,255,0.75);
+}
+.tg-logout-btn::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(110deg, transparent 10%, rgba(255,255,255,0.22) 46%, transparent 78%);
+  transform: translateX(-140%);
+  transition: transform 0.45s ease;
 }
 .tg-logout-btn span {
   display: inline-flex; align-items: center;
   font-size: 14px; line-height: 1;
 }
+.tg-logout-icon {
+  position: relative;
+  z-index: 1;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  justify-content: center;
+  flex-shrink: 0;
+  font-size: 12px !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.22);
+}
+.tgd .tg-logout-icon {
+  background: linear-gradient(135deg, rgba(248,113,113,0.22), rgba(239,68,68,0.1));
+  color: #fecdd3;
+}
+.tgl .tg-logout-icon {
+  background: linear-gradient(135deg, rgba(254,226,226,0.98), rgba(255,241,242,0.98));
+  color: #dc2626;
+}
 .tg-logout-btn:hover {
-  background: rgba(239,68,68,0.14);
-  border-color: rgba(239,68,68,0.4);
+  transform: translateY(-1px);
+}
+.tg-logout-btn:hover::before {
+  transform: translateX(135%);
+}
+.tgd .tg-logout-btn:hover {
+  border-color: rgba(251,113,133,0.4);
+  color: #ffe4e6;
+  box-shadow:
+    0 16px 34px rgba(69,10,10,0.34),
+    inset 0 1px 0 rgba(255,255,255,0.16);
+}
+.tgl .tg-logout-btn:hover {
+  border-color: rgba(239,68,68,0.32);
+  color: #b91c1c;
+  box-shadow:
+    0 14px 28px rgba(248,113,113,0.2),
+    inset 0 1px 0 rgba(255,255,255,0.88);
+}
+.tg-logout-btn:active {
+  transform: translateY(0);
+}
+.tg-logout-btn:focus-visible {
+  outline: none;
+}
+.tgd .tg-logout-btn:focus-visible {
+  border-color: rgba(251,113,133,0.5);
+  box-shadow:
+    0 0 0 3px rgba(248,113,113,0.18),
+    0 16px 34px rgba(69,10,10,0.34);
+}
+.tgl .tg-logout-btn:focus-visible {
+  border-color: rgba(239,68,68,0.36);
+  box-shadow:
+    0 0 0 3px rgba(248,113,113,0.16),
+    0 14px 28px rgba(248,113,113,0.2);
 }
 .tg-logout-label {
   display: inline-flex;
   align-items: center;
+  position: relative;
+  z-index: 1;
+  letter-spacing: 0.01em;
 }
 .tg-panel--collapsed .tg-logout-btn {
-  width: 36px;
-  flex: 0 0 36px;
+  width: 38px;
+  flex: 0 0 38px;
   padding: 0;
+  gap: 0;
 }
 .tg-panel--collapsed .tg-logout-label {
   display: none;
@@ -491,93 +583,260 @@ button, input, select, textarea {
   margin: 0;
 }
 
-.tg-welcome-card {
-  margin: 0 16px 2px;
-  padding: 14px 15px 15px;
-  border-radius: 16px;
-  position: relative;
-  overflow: hidden;
-  isolation: isolate;
-  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
-  background:
-    radial-gradient(circle at top right, color-mix(in srgb, var(--accent2) 16%, transparent), transparent 34%),
-    linear-gradient(
-      135deg,
-      color-mix(in srgb, var(--accent) 16%, var(--panel-bg)),
-      color-mix(in srgb, var(--accent2) 12%, var(--panel-bg))
-    );
-  box-shadow:
-    0 20px 42px color-mix(in srgb, var(--accent) 14%, transparent),
-    var(--surface-shadow);
-  animation: tg-welcome-enter 0.58s cubic-bezier(0.21, 1, 0.32, 1) both;
-}
-.tg-welcome-card::before,
-.tg-welcome-card::after {
-  content: "";
-  position: absolute;
-  inset: 0;
+.tg-welcome-banner-shell {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(calc(100vw - 24px), 500px);
+  z-index: 9200;
   pointer-events: none;
 }
-.tg-welcome-card::before {
-  background: linear-gradient(115deg, transparent 24%, rgba(255,255,255,0.34) 48%, transparent 72%);
-  transform: translateX(-130%);
-  animation: tg-welcome-shine 3.2s ease 0.2s 1;
+.tg-welcome-banner {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: stretch;
+  gap: 16px;
+  padding: 16px 18px 18px;
+  border-radius: 22px;
+  backdrop-filter: blur(24px) saturate(1.25);
+  box-shadow:
+    0 28px 70px rgba(15,23,42,0.24),
+    0 0 0 1px rgba(255,255,255,0.08) inset;
+  animation: tg-welcome-banner-inout 5s cubic-bezier(0.16,1,0.3,1) forwards;
 }
-.tg-welcome-card::after {
-  inset: auto 14px 12px auto;
-  width: 64px;
-  height: 64px;
-  border-radius: 50%;
-  background: radial-gradient(circle, color-mix(in srgb, var(--accent2) 24%, transparent), transparent 66%);
-  opacity: 0.9;
+.tg-welcome-banner::before,
+.tg-welcome-banner::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
 }
-@keyframes tg-welcome-enter {
-  from { opacity: 0; transform: translateY(-10px) scale(0.97); }
-  to   { opacity: 1; transform: translateY(0) scale(1); }
+.tg-welcome-banner::before {
+  inset: 0;
+  background:
+    linear-gradient(120deg, rgba(255,255,255,0.18), transparent 36%, transparent 62%, rgba(255,255,255,0.08)),
+    linear-gradient(180deg, rgba(255,255,255,0.08), transparent 28%);
 }
-@keyframes tg-welcome-shine {
-  from { transform: translateX(-130%); }
-  to   { transform: translateX(130%); }
+.tg-welcome-banner::after {
+  inset: -30% -10% auto auto;
+  width: 220px;
+  height: 220px;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(0,212,255,0.22), transparent 64%);
+  filter: blur(8px);
+  animation: tg-welcome-aura-drift 4.6s ease-in-out infinite;
 }
-.tg-welcome-card > * {
+.tgd .tg-welcome-banner {
+  background:
+    linear-gradient(135deg, rgba(7,15,34,0.94), rgba(16,28,58,0.86)),
+    linear-gradient(90deg, rgba(0,212,255,0.08), rgba(124,58,237,0.08));
+  border: 1px solid rgba(0,212,255,0.22);
+}
+.tgl .tg-welcome-banner {
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.97), rgba(245,249,255,0.92)),
+    linear-gradient(90deg, rgba(56,189,248,0.06), rgba(124,58,237,0.06));
+  border: 1px solid rgba(124,58,237,0.14);
+}
+.tg-welcome-banner > * {
   position: relative;
   z-index: 1;
 }
-.tg-welcome-kicker {
-  display: inline-flex;
+.tg-welcome-banner-icon-wrap {
+  position: relative;
+  flex: 0 0 58px;
+  width: 58px;
+  height: 58px;
+  align-self: center;
+}
+.tg-welcome-banner-icon-wrap::before,
+.tg-welcome-banner-icon-wrap::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 20px;
+}
+.tg-welcome-banner-icon-wrap::before {
+  background: linear-gradient(135deg, rgba(0,212,255,0.22), rgba(124,58,237,0.2));
+  filter: blur(16px);
+  opacity: 0.9;
+  transform: scale(0.88);
+}
+.tg-welcome-banner-icon-wrap::after {
+  border: 1px solid rgba(255,255,255,0.12);
+  opacity: 0.8;
+  animation: tg-welcome-icon-ring 2.6s ease-in-out infinite;
+}
+.tg-welcome-banner-icon {
+  position: relative;
+  width: 58px;
+  height: 58px;
+  border-radius: 18px;
+  display: flex;
   align-items: center;
-  padding: 4px 9px;
-  border-radius: 999px;
-  margin-bottom: 10px;
-  background: color-mix(in srgb, var(--accent) 13%, transparent);
-  color: var(--accent);
+  justify-content: center;
+  background: linear-gradient(135deg, #00d4ff 0%, #7c3aed 100%);
+  color: #ffffff;
+  font-size: 26px;
+  box-shadow:
+    0 16px 30px rgba(0,212,255,0.24),
+    inset 0 1px 0 rgba(255,255,255,0.24);
+  animation: tg-welcome-icon-float 2.4s ease-in-out infinite;
+}
+.tg-welcome-banner-text {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding-right: 8px;
+}
+.tg-welcome-banner-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+}
+.tg-welcome-banner-kicker {
   font-size: 10px;
-  font-weight: 800;
+  font-weight: 700;
   line-height: 1;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
 }
-.tg-welcome-title {
+.tgd .tg-welcome-banner-kicker { color: #67e8f9; }
+.tgl .tg-welcome-banner-kicker { color: #7c3aed; }
+.tg-welcome-banner-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.tgd .tg-welcome-banner-badge {
+  background: rgba(15,118,110,0.18);
+  border: 1px solid rgba(45,212,191,0.2);
+  color: #99f6e4;
+}
+.tgl .tg-welcome-banner-badge {
+  background: rgba(236,253,245,0.96);
+  border: 1px solid rgba(16,185,129,0.16);
+  color: #047857;
+}
+.tg-welcome-banner-badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  box-shadow: 0 0 0 0 rgba(45,212,191,0.45);
+  animation: tg-welcome-badge-pulse 1.9s ease-out infinite;
+}
+.tg-welcome-banner-title {
+  margin-top: 5px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
   color: var(--text-1);
-  font-size: 18px;
-  font-weight: 800;
+  font-size: 20px;
+  font-weight: 500;
   line-height: 1.15;
   letter-spacing: -0.03em;
+  text-shadow: 0 1px 0 rgba(255,255,255,0.08);
+  width: 100%;
 }
-.tg-welcome-title span {
-  display: block;
-  color: color-mix(in srgb, var(--accent2) 58%, var(--text-1));
+.tg-welcome-banner-greeting {
+  font-weight: 500;
+  opacity: 0.92;
 }
-.tg-welcome-copy {
-  margin-top: 6px;
-  max-width: 26ch;
+.tg-welcome-banner-name {
+  font-weight: 800;
+  letter-spacing: -0.035em;
+}
+.tgd .tg-welcome-banner-name {
+  color: #f8fbff;
+}
+.tgl .tg-welcome-banner-name {
+  color: #0f172a;
+}
+.tg-welcome-banner-hand {
+  display: inline-block;
+  transform-origin: 70% 70%;
+  animation: tg-welcome-hand-wave 1.8s ease-in-out infinite;
+}
+.tg-welcome-banner-copy {
+  margin-top: 7px;
   color: var(--text-2);
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 12.8px;
+  font-weight: 500;
   line-height: 1.5;
+  max-width: none;
+  width: 100%;
 }
-.tg-panel--collapsed .tg-welcome-card {
-  display: none;
+.tg-welcome-banner-progress {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 8px;
+  height: 3px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255,255,255,0.08);
+}
+.tgl .tg-welcome-banner-progress {
+  background: rgba(148,163,184,0.18);
+}
+.tg-welcome-banner-progress::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #00d4ff, #7c3aed, #10b981);
+  transform-origin: left center;
+  animation: tg-welcome-progress 5s linear forwards;
+}
+@keyframes tg-welcome-banner-inout {
+  0%   { opacity: 0; transform: translateY(-22px) scale(0.95); }
+  10%  { opacity: 1; transform: translateY(0) scale(1); }
+  82%  { opacity: 1; transform: translateY(0) scale(1); }
+  100% { opacity: 0; transform: translateY(-18px) scale(0.97); }
+}
+@keyframes tg-welcome-hand-wave {
+  0%,100% { transform: rotate(0deg); }
+  12% { transform: rotate(15deg); }
+  24% { transform: rotate(-8deg); }
+  36% { transform: rotate(14deg); }
+  48% { transform: rotate(-4deg); }
+  60% { transform: rotate(0deg); }
+}
+@keyframes tg-welcome-aura-drift {
+  0%,100% { transform: translate3d(0,0,0) scale(1); opacity: 0.82; }
+  50% { transform: translate3d(-12px, 10px, 0) scale(1.08); opacity: 1; }
+}
+@keyframes tg-welcome-icon-float {
+  0%,100% { transform: translateY(0px); }
+  50% { transform: translateY(-3px); }
+}
+@keyframes tg-welcome-icon-ring {
+  0%,100% { transform: scale(1); opacity: 0.7; }
+  50% { transform: scale(1.06); opacity: 1; }
+}
+@keyframes tg-welcome-badge-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(45,212,191,0.48); }
+  70% { box-shadow: 0 0 0 8px rgba(45,212,191,0); }
+  100% { box-shadow: 0 0 0 0 rgba(45,212,191,0); }
+}
+@keyframes tg-welcome-progress {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
 }
 
 /* ── Panel body (scrollable) ── */
@@ -968,6 +1227,80 @@ button, input, select, textarea {
   box-shadow: 0 0 0 3px rgba(124,58,237,0.1);
   background: rgba(124,58,237,0.03);
 }
+.tg-search-meta {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+.tg-search-meta strong {
+  color: var(--text-1);
+  font-weight: 800;
+}
+.tg-filter-row {
+  margin-top: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tg-filter-chip {
+  min-height: 34px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--input-bg);
+  color: var(--text-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: 'Open Sans', sans-serif;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease, color 0.18s ease;
+}
+.tg-filter-chip:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-hi);
+  color: var(--text-1);
+}
+.tg-filter-chip:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.tg-filter-chip--active {
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--border-hi));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 16%, rgba(255,255,255,0.16)), transparent 68%),
+    color-mix(in srgb, var(--accent) 12%, var(--card));
+  color: var(--text-1);
+  box-shadow: 0 12px 26px rgba(59,130,246,0.12);
+}
+.tgd .tg-filter-chip--active {
+  box-shadow: 0 16px 28px rgba(34,211,238,0.14);
+}
+.tg-filter-chip-count {
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--text-1);
+  font-size: 10px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
 .tgd .tg-select option { background: #0d1a35; color: #f1f5f9; }
 .tgl .tg-select option { background: #fff; color: #1e293b; }
 .tg-field-stack {
@@ -1195,15 +1528,42 @@ button, input, select, textarea {
   display: flex; flex-direction: column; gap: 10px; z-index: 9999;
 }
 .tg-toast {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: flex-start; gap: 10px;
   padding: 14px 18px; border-radius: 13px;
   font-family: 'Open Sans', sans-serif;
-  font-size: 13.5px; font-weight: 700;
   backdrop-filter: blur(20px);
   box-shadow: 0 12px 36px rgba(0,0,0,0.3);
   animation: tg-toast-in 0.32s cubic-bezier(0.16,1,0.3,1) both;
   cursor: pointer; min-width: 240px; max-width: 330px;
   transition: opacity 0.2s;
+}
+.tg-toast-icon {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  font-size: 14px;
+  line-height: 1;
+}
+.tg-toast-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.tg-toast-title {
+  font-size: 13.5px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+.tg-toast-msg {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+.tg-toast-msg--solo {
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.35;
 }
 .tg-toast:hover { opacity: 0.85; }
 @keyframes tg-toast-in {
@@ -1390,6 +1750,18 @@ button, input, select, textarea {
 .tg-node-tooltip-status--blocked { color: var(--status-blocked); }
 .tg-node-tooltip-status--ready { color: var(--status-pending); }
 .tg-node-tooltip-status--unlinked { color: var(--text-3); }
+.tg-node-tooltip-callout {
+  margin-bottom: 10px;
+  padding: 9px 10px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--status-blocked) 16%, transparent);
+  background: color-mix(in srgb, var(--status-blocked) 10%, var(--panel-bg));
+  color: var(--status-blocked);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.45;
+  text-align: left;
+}
 .tg-node-tooltip-grid {
   display: grid;
   gap: 10px;
@@ -1694,6 +2066,37 @@ button, input, select, textarea {
     height: auto;
     min-height: 100dvh;
   }
+  .tg-welcome-banner-shell {
+    top: 12px;
+    width: min(calc(100vw - 16px), 460px);
+  }
+  .tg-welcome-banner {
+    gap: 12px;
+    padding: 13px 14px 16px;
+    border-radius: 18px;
+  }
+  .tg-welcome-banner-icon-wrap {
+    width: 48px;
+    height: 48px;
+    flex-basis: 48px;
+  }
+  .tg-welcome-banner-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 16px;
+    font-size: 22px;
+  }
+  .tg-welcome-banner-meta {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 7px;
+  }
+  .tg-welcome-banner-title {
+    font-size: 17px;
+  }
+  .tg-welcome-banner-copy {
+    font-size: 12px;
+  }
   .tg-panel {
     height: min(42dvh, 340px);
   }
@@ -1901,10 +2304,15 @@ function layoutNodes(nodes, edges, direction = "TB") {
 ═══════════════════════════════════════════════════════ */
 function useToast() {
   const [toasts, setToasts] = useState([]);
-  const show = useCallback((msg, type="info") => {
+  const show = useCallback((content, type="info") => {
     const id = Date.now()+Math.random();
-    setToasts(t=>[...t,{id,msg,type}]);
-    setTimeout(()=>setToasts(t=>t.filter(x=>x.id!==id)), 3500);
+    const toast = typeof content === "string"
+      ? {msg: content, type}
+      : {type, ...content};
+    const duration = Number.isFinite(toast.duration) ? toast.duration : 3500;
+
+    setToasts(t=>[...t,{id,...toast}]);
+    setTimeout(()=>setToasts(t=>t.filter(x=>x.id!==id)), duration);
   },[]);
   const dismiss = useCallback(id=>setToasts(t=>t.filter(x=>x.id!==id)),[]);
   return {toasts,show,dismiss};
@@ -1986,6 +2394,9 @@ function TaskNode({data}) {
             {data.statusText}
           </div>
         </div>
+        {data.blockedSummary && (
+          <div className="tg-node-tooltip-callout">{data.blockedSummary}</div>
+        )}
         <div className="tg-node-tooltip-grid">
           <TaskTooltipSection
             title="Depends on"
@@ -2345,6 +2756,52 @@ function RouteBootScreen({dark}) {
   );
 }
 
+function WelcomeBanner({banner}) {
+  if (!banner) return null;
+
+  return (
+    <div className="tg-welcome-banner-shell" role="status" aria-live="polite">
+      <div className="tg-welcome-banner" key={banner.id}>
+        <div className="tg-welcome-banner-icon-wrap" aria-hidden="true">
+          <div className="tg-welcome-banner-icon">
+            {banner.icon}
+          </div>
+        </div>
+        <div className="tg-welcome-banner-text">
+          <div className="tg-welcome-banner-meta">
+            <div className="tg-welcome-banner-kicker">{banner.kicker}</div>
+            <div className="tg-welcome-banner-badge">
+              <span className="tg-welcome-banner-badge-dot" />
+              Workspace synced
+            </div>
+          </div>
+          <div className="tg-welcome-banner-title">
+            <span className="tg-welcome-banner-greeting">{banner.greeting}</span>
+            <span className="tg-welcome-banner-name">{banner.name}</span>
+            <span className="tg-welcome-banner-hand" aria-hidden="true">👋</span>
+          </div>
+          <div className="tg-welcome-banner-copy">{banner.detail}</div>
+        </div>
+        <div className="tg-welcome-banner-progress" aria-hidden="true" />
+      </div>
+    </div>
+  );
+}
+
+function buildTaskFilterEmptyMessage(searchTerm, filterLabel, hasStatusFilter) {
+  const trimmedSearch = searchTerm.trim();
+
+  if (trimmedSearch && hasStatusFilter) {
+    return `No tasks match "${trimmedSearch}" in ${filterLabel}. Try a different keyword or status filter.`;
+  }
+
+  if (trimmedSearch) {
+    return `No tasks match "${trimmedSearch}". Try a different keyword.`;
+  }
+
+  return `No tasks currently match ${filterLabel}. Try another status filter.`;
+}
+
 /* ═══════════════════════════════════════════════════════
    APP
 ═══════════════════════════════════════════════════════ */
@@ -2358,13 +2815,16 @@ export default function App() {
   const [nodes,    setNodes]    = useState([]);
   const [edges,    setEdges]    = useState([]);
   const [search,   setSearch]   = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
   const [taskName, setTaskName] = useState("");
   const [parent,   setParent]   = useState("");
   const [child,    setChild]    = useState("");
   const [editTaskId, setEditTaskId] = useState("");
   const [editTaskName, setEditTaskName] = useState("");
   const [modal,    setModal]    = useState(null);
-  const [showWelcomeMessage, setShowWelcomeMessage] = useState(false);
+  const [welcomeBanner, setWelcomeBanner] = useState(null);
+  const [boardReady, setBoardReady] = useState(false);
+  const [boardError, setBoardError] = useState("");
   const [dark, setDark] = useState(() => {
     try {
       return localStorage.getItem("tg-dark") !== "false";
@@ -2390,6 +2850,7 @@ export default function App() {
   const flowRef    = useRef(null);
   const graphRef   = useRef(null);
   const pendingDashboardWelcome = useRef(false);
+  const hasShownDashboardWelcome = useRef(false);
 
   const navigate = useCallback((nextRoute, {replace=false} = {}) => {
     const normalizedRoute = normalizeRoute(nextRoute);
@@ -2410,6 +2871,24 @@ export default function App() {
       duration,
     });
   },[]);
+
+  const ensureBoardReady = useCallback(() => {
+    if (!user) {
+      return false;
+    }
+
+    if (!boardReady) {
+      toast("Your task board is still syncing. Please wait a moment.", "info");
+      return false;
+    }
+
+    if (boardError) {
+      toast("Cloud sync is unavailable right now. Refresh and try again.", "error");
+      return false;
+    }
+
+    return true;
+  }, [boardError, boardReady, toast, user]);
 
   // Inject CSS
   useEffect(()=>{
@@ -2490,33 +2969,111 @@ export default function App() {
   }, [authReady, navigate, route, user]);
 
   useEffect(() => {
-    if (route !== ROUTES.dashboard) {
-      setShowWelcomeMessage(false);
-      return undefined;
-    }
+    if (route !== ROUTES.dashboard) return undefined;
+    if (!authReady || !user) return undefined;
 
-    if (!authReady || !user || !pendingDashboardWelcome.current) return undefined;
+    const shouldShowWelcome =
+      pendingDashboardWelcome.current || !hasShownDashboardWelcome.current;
+
+    if (!shouldShowWelcome) return undefined;
 
     pendingDashboardWelcome.current = false;
-    setShowWelcomeMessage(true);
-
-    const timer = setTimeout(() => setShowWelcomeMessage(false), 4200);
-    return () => clearTimeout(timer);
+    hasShownDashboardWelcome.current = true;
+    setWelcomeBanner({
+      id: Date.now(),
+      ...buildWelcomeBanner(formatUserDisplayName(user)),
+    });
+    return undefined;
   }, [authReady, route, user]);
+
+  useEffect(() => {
+    if (!welcomeBanner) return undefined;
+
+    const timer = setTimeout(() => setWelcomeBanner(null), 5000);
+    return () => clearTimeout(timer);
+  }, [welcomeBanner]);
+
+  useEffect(() => {
+    if (route === ROUTES.dashboard && user) return;
+    setWelcomeBanner(null);
+  }, [route, user]);
+
+  useEffect(() => {
+    if (user) return;
+    hasShownDashboardWelcome.current = false;
+  }, [user]);
 
   // Firestore
   useEffect(()=>{
-    if(!user) return;
-    const u1=onSnapshot(collection(db,"users",user.uid,"nodes"),s=>setNodes(s.docs.map(d=>d.data())));
-    const u2=onSnapshot(collection(db,"users",user.uid,"edges"),s=>setEdges(s.docs.map(d=>d.data())));
-    return()=>{u1();u2();};
-  },[user]);
+    if(!user){
+      setNodes([]);
+      setEdges([]);
+      setBoardReady(false);
+      setBoardError("");
+      return undefined;
+    }
+
+    setBoardReady(false);
+    setBoardError("");
+
+    let active = true;
+    let nodesLoaded = false;
+    let edgesLoaded = false;
+    let syncErrorShown = false;
+
+    const markLoaded = () => {
+      if (active && nodesLoaded && edgesLoaded) {
+        setBoardReady(true);
+        setBoardError("");
+      }
+    };
+
+    const handleSyncError = () => {
+      if (!active) return;
+
+      const message = "We couldn't load your saved board from Firestore. Refresh and check your Firebase access.";
+      setBoardError(message);
+      setBoardReady(true);
+
+      if (!syncErrorShown) {
+        syncErrorShown = true;
+        toast(message, "error");
+      }
+    };
+
+    const unsubscribeNodes = onSnapshot(
+      collection(db,"users",user.uid,"nodes"),
+      snapshot => {
+        if (!active) return;
+        setNodes(snapshot.docs.map(docSnapshot => docSnapshot.data()));
+        nodesLoaded = true;
+        markLoaded();
+      },
+      handleSyncError
+    );
+    const unsubscribeEdges = onSnapshot(
+      collection(db,"users",user.uid,"edges"),
+      snapshot => {
+        if (!active) return;
+        setEdges(snapshot.docs.map(docSnapshot => docSnapshot.data()));
+        edgesLoaded = true;
+        markLoaded();
+      },
+      handleSyncError
+    );
+
+    return()=>{
+      active = false;
+      unsubscribeNodes();
+      unsubscribeEdges();
+    };
+  },[toast, user]);
 
   useEffect(()=>{
     if(!flowRef.current||nodes.length===0) return;
     const id=setTimeout(()=>fitGraph(), 80);
     return()=>clearTimeout(id);
-  },[nodes.length,edges.length,search,layoutDirection,fitGraph]);
+  },[nodes.length,edges.length,layoutDirection,search,statusFilter,fitGraph]);
 
   useEffect(()=>{
     if(!graphRef.current) return;
@@ -2536,35 +3093,47 @@ export default function App() {
 
   // CRUD
   const deleteNode=async(nodeId,label)=>{
+    if(!ensureBoardReady()) return;
     const ok=await confirm({icon:"🗑️",title:"Delete Task",
       message:`Permanently delete "${label}" and all its dependency links?`,
       danger:true,confirmLabel:"Delete Task"
     });
     if(!ok) return;
-    const[ns,es]=await Promise.all([
-      getDocs(collection(db,"users",user.uid,"nodes")),
-      getDocs(collection(db,"users",user.uid,"edges")),
-    ]);
-    await Promise.all([
-      ...ns.docs.filter(d=>d.data().id===nodeId).map(d=>deleteDoc(doc(db,"users",user.uid,"nodes",d.id))),
-      ...es.docs.filter(d=>d.data().source===nodeId||d.data().target===nodeId).map(d=>deleteDoc(doc(db,"users",user.uid,"edges",d.id))),
-    ]);
-    toast(`"${label}" deleted`,"error");
+    try {
+      const[ns,es]=await Promise.all([
+        getDocs(collection(db,"users",user.uid,"nodes")),
+        getDocs(collection(db,"users",user.uid,"edges")),
+      ]);
+      await Promise.all([
+        ...ns.docs.filter(d=>d.data().id===nodeId).map(d=>deleteDoc(doc(db,"users",user.uid,"nodes",d.id))),
+        ...es.docs.filter(d=>d.data().source===nodeId||d.data().target===nodeId).map(d=>deleteDoc(doc(db,"users",user.uid,"edges",d.id))),
+      ]);
+      toast(`"${label}" deleted`,"error");
+    } catch (error) {
+      toast("Could not delete this task right now. Please try again.", "error");
+    }
   };
 
   const addTask=async()=>{
+    if(!ensureBoardReady()) return;
     if(!taskName.trim()) return;
-    await addDoc(collection(db,"users",user.uid,"nodes"),{
-      id:Date.now().toString(),
-      data:{label:taskName.trim(),completed:false},
-      position:{x:0,y:0}
-    });
-    toast(`"${taskName.trim()}" added`,"success");
-    setTaskName("");
+    const nextTaskName = taskName.trim();
+    try {
+      await addDoc(collection(db,"users",user.uid,"nodes"),{
+        id:Date.now().toString(),
+        data:{label:nextTaskName,completed:false},
+        position:{x:0,y:0}
+      });
+      toast(`"${nextTaskName}" added`,"success");
+      setTaskName("");
+    } catch (error) {
+      toast("Could not save this task right now. Please try again.", "error");
+    }
   };
 
 
     const editTask = async () => {
+    if(!ensureBoardReady()) return;
     if (!editTaskId || !editTaskName.trim()) return;
     
     // Check if name actually changed
@@ -2593,43 +3162,107 @@ export default function App() {
   };
 
   const addDep=async()=>{
-    if(!parent||!child||parent===child) return;
-    if(edges.some(e=>e.source===parent&&e.target===child)){
-      toast("Dependency already exists","warn"); return;
+    if(!ensureBoardReady()) return;
+    const localValidation = validateDependencyLink({
+      sourceId: parent,
+      targetId: child,
+      nodes,
+      edges,
+    });
+    if(localValidation){
+      toast(localValidation.message, localValidation.type);
+      return;
     }
-    const ne={id:`e${parent}-${child}`,source:parent,target:child,animated:true};
-    if(hasCycle(buildGraph([...edges,ne]))){
-      toast("⚠ Circular dependency detected!","error"); return;
+
+    try {
+      const [nodeSnapshot, edgeSnapshot] = await Promise.all([
+        getDocs(collection(db,"users",user.uid,"nodes")),
+        getDocs(collection(db,"users",user.uid,"edges")),
+      ]);
+      const currentNodes = nodeSnapshot.docs
+        .map(snapshot => snapshot.data())
+        .filter(item => item?.id);
+      const currentEdges = edgeSnapshot.docs
+        .map(snapshot => snapshot.data())
+        .filter(item => item?.source && item?.target);
+
+      const serverValidation = validateDependencyLink({
+        sourceId: parent,
+        targetId: child,
+        nodes: currentNodes,
+        edges: currentEdges,
+      });
+      if(serverValidation){
+        if(serverValidation.code === "missing-task"){
+          const currentNodeIds = new Set(currentNodes.map(node => node.id));
+          if(!currentNodeIds.has(parent)) setParent("");
+          if(!currentNodeIds.has(child)) setChild("");
+        }
+        toast(serverValidation.message, serverValidation.type);
+        return;
+      }
+
+      const nextEdge = {
+        id: buildDependencyEdgeId(parent, child),
+        source: parent,
+        target: child,
+        animated: true,
+      };
+      const edgeRef = doc(db, "users", user.uid, "edges", buildDependencyDocId(parent, child));
+
+      await runTransaction(db, async transaction => {
+        const existingEdge = await transaction.get(edgeRef);
+        if (existingEdge.exists()) {
+          const err = new Error("Dependency already exists.");
+          err.code = "dependency/duplicate";
+          throw err;
+        }
+
+        transaction.set(edgeRef, nextEdge);
+      });
+    } catch (error) {
+      if (error?.code === "dependency/duplicate") {
+        toast("Dependency already exists", "warn");
+        return;
+      }
+
+      toast("Could not link tasks right now. Please try again.", "error");
+      return;
     }
-    await addDoc(collection(db,"users",user.uid,"edges"),ne);
+
     toast("Tasks linked","success");
     setParent("");setChild("");
   };
 
   const onNodeClick=(_,node)=>{
+    if(!ensureBoardReady()) return;
     if(clickTimer.current){
       clearTimeout(clickTimer.current);clickTimer.current=null;
       deleteNode(node.id,node.data.label);
     } else {
       clickTimer.current=setTimeout(async()=>{
-        const ns=await getDocs(collection(db,"users",user.uid,"nodes"));
-        const d=ns.docs.find(x=>x.data().id===node.id);
-        if(d){
-          const was=d.data().data.completed;
-          const linked=hasLinkedDependency(node.id,edges);
-          if(!was&&!linked){
-            toast(formatUnlinkedTaskMessage(node.data.label),"warn");
-            clickTimer.current=null;
-            return;
+        try {
+          const ns=await getDocs(collection(db,"users",user.uid,"nodes"));
+          const d=ns.docs.find(x=>x.data().id===node.id);
+          if(d){
+            const was=d.data().data.completed;
+            const linked=hasLinkedDependency(node.id,edges);
+            if(!was&&!linked){
+              toast(formatUnlinkedTaskMessage(node.data.label),"warn");
+              clickTimer.current=null;
+              return;
+            }
+            const blockers=getBlockingTasks(node.id,edges,nodes);
+            if(!was&&blockers.length){
+              toast(formatBlockedTaskMessage(blockers),"warn");
+              clickTimer.current=null;
+              return;
+            }
+            await updateDoc(doc(db,"users",user.uid,"nodes",d.id),{"data.completed":!was});
+            toast(was?"Marked as pending":"Completed",was?"info":"success");
           }
-          const blockers=getBlockingTasks(node.id,edges,nodes);
-          if(!was&&blockers.length){
-            toast(formatBlockedTaskMessage(blockers),"warn");
-            clickTimer.current=null;
-            return;
-          }
-          await updateDoc(doc(db,"users",user.uid,"nodes",d.id),{"data.completed":!was});
-          toast(was?"Marked as pending":"Completed",was?"info":"success");
+        } catch (error) {
+          toast("Could not update this task right now. Please try again.", "error");
         }
         clickTimer.current=null;
       },260);
@@ -2637,14 +3270,19 @@ export default function App() {
   };
 
   const onEdgeClick=async(_,edge)=>{
+    if(!ensureBoardReady()) return;
     const ok=await confirm({icon:"🔗",title:"Remove Dependency",
       message:"Remove this dependency link between the two tasks?",
       danger:true,confirmLabel:"Remove"
     });
     if(!ok) return;
-    const es=await getDocs(collection(db,"users",user.uid,"edges"));
-    await Promise.all(es.docs.filter(d=>d.data().id===edge.id).map(d=>deleteDoc(doc(db,"users",user.uid,"edges",d.id))));
-    toast("Dependency removed","info");
+    try {
+      const es=await getDocs(collection(db,"users",user.uid,"edges"));
+      await Promise.all(es.docs.filter(d=>d.data().id===edge.id).map(d=>deleteDoc(doc(db,"users",user.uid,"edges",d.id))));
+      toast("Dependency removed","info");
+    } catch (error) {
+      toast("Could not remove this dependency right now. Please try again.", "error");
+    }
   };
 
   const handleLogout=async()=>{
@@ -2654,7 +3292,8 @@ export default function App() {
     });
     if(ok){
       pendingDashboardWelcome.current = false;
-      setShowWelcomeMessage(false);
+      hasShownDashboardWelcome.current = false;
+      setWelcomeBanner(null);
       await signOut(auth);
       setUser(null);
       navigate(ROUTES.landing, {replace: true});
@@ -2663,27 +3302,71 @@ export default function App() {
   };
 
   const resetAll=async()=>{
+    if(!ensureBoardReady()) return;
     const ok=await confirm({icon:"💥",title:"Reset Board",
       message:"This will permanently delete ALL tasks and dependencies. This action cannot be undone.",
       danger:true,confirmLabel:"Reset Everything"
     });
     if(!ok) return;
-    const[ns,es]=await Promise.all([
-      getDocs(collection(db,"users",user.uid,"nodes")),
-      getDocs(collection(db,"users",user.uid,"edges")),
-    ]);
-    await Promise.all([
-      ...ns.docs.map(d=>deleteDoc(doc(db,"users",user.uid,"nodes",d.id))),
-      ...es.docs.map(d=>deleteDoc(doc(db,"users",user.uid,"edges",d.id))),
-    ]);
-    toast("Board reset","error");
+    try {
+      const[ns,es]=await Promise.all([
+        getDocs(collection(db,"users",user.uid,"nodes")),
+        getDocs(collection(db,"users",user.uid,"edges")),
+      ]);
+      await Promise.all([
+        ...ns.docs.map(d=>deleteDoc(doc(db,"users",user.uid,"nodes",d.id))),
+        ...es.docs.map(d=>deleteDoc(doc(db,"users",user.uid,"edges",d.id))),
+      ]);
+      toast("Board reset","error");
+    } catch (error) {
+      toast("Could not reset the board right now. Please try again.", "error");
+    }
   };
 
   // Stats
-  const total=nodes.length;
-  const done=nodes.filter(n=>n.data.completed).length;
-  const blocked=nodes.filter(n=>!n.data.completed&&isBlocked(n.id,edges,nodes)).length;
-  const ready=nodes.filter(n=>!n.data.completed&&!isBlocked(n.id,edges,nodes)).length;
+  const statusSummary = getTaskStatusSummary(nodes, edges);
+  const total=statusSummary.total;
+  const done=statusSummary.completed;
+  const pending=statusSummary.pending;
+  const blocked=statusSummary.blocked;
+  const ready=statusSummary.ready;
+  const unlinked=statusSummary.unlinked;
+  const boardSyncActive = !!user && boardReady && !boardError;
+  const taskFilterOptions = [
+    { value: "all", label: "All tasks", count: total },
+    { value: "open", label: "Open / Ready", count: ready },
+    { value: "blocked", label: "Blocked", count: blocked },
+    { value: "complete", label: "Completed", count: done },
+    { value: "unlinked", label: "Needs dependency", count: unlinked },
+  ];
+  const activeTaskFilterLabel =
+    taskFilterOptions.find(option => option.value === statusFilter)?.label || "All tasks";
+  const filteredNodes = nodes.filter(node =>
+    matchesTaskSearch(node, search) && matchesTaskViewFilter(node, edges, nodes, statusFilter)
+  );
+  const filteredNodeIds = new Set(filteredNodes.map(node => node.id));
+  const filteredEdges = edges.filter(edge =>
+    filteredNodeIds.has(edge.source) && filteredNodeIds.has(edge.target)
+  );
+  const visibleTaskCount = filteredNodes.length;
+  const hasActiveTaskFilters = Boolean(search.trim()) || statusFilter !== "all";
+  const showFilteredEmptyState = boardReady && total > 0 && visibleTaskCount === 0;
+  const showEmptyState = !boardReady || total===0 || showFilteredEmptyState;
+  const emptyStateIcon = boardError ? "!" : !boardReady ? "..." : "◈";
+  const emptyStateTitle = boardError
+    ? "Cloud sync unavailable"
+    : !boardReady
+      ? "Syncing your workspace"
+      : showFilteredEmptyState
+        ? "No matching tasks"
+      : "No tasks yet";
+  const emptyStateSubtitle = boardError
+    ? "We couldn't load your saved tasks from Firestore. Refresh and check your Firebase access."
+    : !boardReady
+      ? "Loading your saved tasks and dependencies from Firestore..."
+      : showFilteredEmptyState
+        ? buildTaskFilterEmptyMessage(search, activeTaskFilterLabel, statusFilter !== "all")
+      : "Add your first task from the panel on the left";
   const pct=total>0?Math.round((done/total)*100):0;
   const statusColors={
     complete: dark?"#10b981":"#059669",
@@ -2699,7 +3382,7 @@ export default function App() {
     },
     {
       key:"pending",
-      label:"Pending / Ready",
+      label:"Open / Ready",
       count:ready,
       className:"tg-status-pending",
     },
@@ -2732,18 +3415,19 @@ export default function App() {
       };
 
   // Styled nodes
-  const styledNodes=layoutNodes(nodes,edges,layoutDirection)
-    .filter(n=>n.data.label.toLowerCase().includes(search.toLowerCase()))
+  const styledNodes=layoutNodes(filteredNodes,filteredEdges,layoutDirection)
     .map(n=>{
-      const d=n.data.completed, b=isBlocked(n.id,edges,nodes), linked=hasLinkedDependency(n.id,edges);
-      const match=search&&n.data.label.toLowerCase().includes(search.toLowerCase());
+      const blockers=getBlockingTasks(n.id,edges,nodes);
+      const status = getTaskWorkflowStatus(n, edges, nodes);
+      const d=status==="complete", b=status==="blocked", linked=status!=="unlinked"&&status!=="unknown";
+      const match=Boolean(search.trim())&&matchesTaskSearch(n, search);
       const {parents, children} = getTaskDependencies(n.id, edges, nodes);
+      const blockedSummary = !d && b ? formatBlockedTaskSummary(blockers) : null;
       const mapDependency = item => ({
         id: item.id,
         label: item.data.label,
         completed: item.data.completed,
       });
-      const status = d ? "complete" : !linked ? "unlinked" : b ? "blocked" : "ready";
       const statusText = d ? "Completed" : !linked ? "Needs dependency" : b ? "Blocked" : "Ready";
       const dependencyList = (items, emptyText) =>
         items.length ? items.map(item=>item.data.label).join(", ") : emptyText;
@@ -2768,6 +3452,7 @@ export default function App() {
           ...n.data,
           status,
           statusText,
+          blockedSummary,
           parents: parents.map(mapDependency),
           children: children.map(mapDependency),
           sourceHandlePosition: n.sourcePosition || currentLayout.sourcePosition,
@@ -2788,9 +3473,10 @@ export default function App() {
           accessibleLabel: [
             n.data.label,
             statusText,
+            blockedSummary,
             `Depends on: ${dependencyList(parents, "none")}`,
             `Required by: ${dependencyList(children, "none")}`,
-          ].join(". "),
+          ].filter(Boolean).join(". "),
         },
         style:{
           cursor:"pointer",
@@ -2874,11 +3560,13 @@ export default function App() {
 
   /* ══ DASHBOARD ══ */
   return (
-    <div className={`tg-shell ${tc}`}>
-      <Modal modal={modal} dark={dark} />
+    <>
+      <WelcomeBanner banner={welcomeBanner} />
+      <div className={`tg-shell ${tc}`}>
+        <Modal modal={modal} dark={dark} />
 
-      {/* ══ PANEL ══ */}
-      <div className={`tg-panel ${panelCollapsed ? "tg-panel--collapsed" : ""}`}>
+        {/* ══ PANEL ══ */}
+        <div className={`tg-panel ${panelCollapsed ? "tg-panel--collapsed" : ""}`}>
         {/* Header */}
         <div className="tg-panel-head">
           <div className="tg-brand-row">
@@ -2924,7 +3612,7 @@ export default function App() {
               title="Logout"
               aria-label="Logout"
             >
-              <span>↪</span>
+              <span className="tg-logout-icon">↪</span>
               <span className="tg-logout-label">Logout</span>
             </button>
           </div>
@@ -2952,19 +3640,6 @@ export default function App() {
           </div>
         )}
 
-        {showWelcomeMessage && user && !panelCollapsed && (
-          <div className="tg-welcome-card" role="status" aria-live="polite">
-            <div className="tg-welcome-kicker">Dashboard Ready</div>
-            <div className="tg-welcome-title">
-              Welcome back,
-              <span>{userDisplayName}</span>
-            </div>
-            <div className="tg-welcome-copy">
-              Your task graph is synced and ready for the next move.
-            </div>
-          </div>
-        )}
-
         {/* Body */}
         <div className="tg-panel-body">
 
@@ -2972,8 +3647,8 @@ export default function App() {
           <div className="tg-stats">
             {[
               {label:"Total",     val:total,   color:"var(--text-1)"},
-              {label:"Complete",  val:done,    color:"var(--status-complete)"},
-              {label:"Pending",   val:ready,   color:"var(--status-pending)"},
+              {label:"Completed", val:done,    color:"var(--status-complete)"},
+              {label:"Pending",   val:pending, color:"var(--status-pending)"},
               {label:"Blocked",   val:blocked, color:"var(--status-blocked)"},
             ].map((s,i)=>(
               <div className="tg-stat" key={s.label} style={{animationDelay:`${i*0.05+0.1}s`}}>
@@ -2999,9 +3674,31 @@ export default function App() {
 
           {/* Search */}
           <div className="tg-section">
-            <div className="tg-sec-label">Search</div>
+            <div className="tg-sec-label">Search & Filter</div>
             <input className="tg-input" type="text" placeholder="🔍  Find task…"
               value={search} onChange={e=>setSearch(e.target.value)}/>
+            <div className="tg-search-meta">
+              <span>
+                {hasActiveTaskFilters
+                  ? `Showing ${visibleTaskCount} of ${total} tasks`
+                  : `${total} tasks available`}
+              </span>
+              <strong>{activeTaskFilterLabel}</strong>
+            </div>
+            <div className="tg-filter-row" role="group" aria-label="Task status filter">
+              {taskFilterOptions.map(option=>(
+                <button
+                  key={option.value}
+                  type="button"
+                  className={`tg-filter-chip ${statusFilter===option.value ? "tg-filter-chip--active" : ""}`}
+                  onClick={()=>setStatusFilter(option.value)}
+                  aria-pressed={statusFilter===option.value}
+                >
+                  <span>{option.label}</span>
+                  <span className="tg-filter-chip-count">{option.count}</span>
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="tg-section">
@@ -3035,7 +3732,7 @@ export default function App() {
             <input className="tg-input" type="text" placeholder="Task name…"
               value={taskName} onChange={e=>setTaskName(e.target.value)}
               onKeyDown={e=>e.key==="Enter"&&addTask()}/>
-            <button className="tg-btn tg-btn-primary" onClick={addTask} disabled={!taskName.trim()}>
+            <button className="tg-btn tg-btn-primary" onClick={addTask} disabled={!taskName.trim() || !boardSyncActive}>
               + Add Task
             </button>
           </div>
@@ -3082,7 +3779,7 @@ export default function App() {
               </div>
             )}
             <button className="tg-btn tg-btn-primary" onClick={addDep}
-              disabled={!parent||!child||parent===child}>
+              disabled={!parent||!child||parent===child||!boardSyncActive}>
               Link Tasks →
             </button>
           </div>
@@ -3124,7 +3821,7 @@ export default function App() {
                   <button 
                     className="tg-btn tg-btn-primary" 
                     onClick={editTask}
-                    disabled={!editTaskName.trim()}
+                    disabled={!editTaskName.trim() || !boardSyncActive}
                     style={{ flex: 1 }}
                   >
                     💾 Save
@@ -3158,7 +3855,7 @@ export default function App() {
           </div>
 
           {/* Reset */}
-          <button className="tg-btn tg-btn-danger" onClick={resetAll} disabled={total===0}>
+          <button className="tg-btn tg-btn-danger" onClick={resetAll} disabled={total===0 || !boardSyncActive}>
             🗑 Reset Board
           </button>
 
@@ -3187,11 +3884,11 @@ export default function App() {
             ))}
           </div>
         </div>
-        {nodes.length===0&&(
+        {showEmptyState&&(
           <div className="tg-empty">
-            <div className="tg-empty-icon">◈</div>
-            <div className="tg-empty-t">No tasks yet</div>
-            <div className="tg-empty-s">Add your first task from the panel on the left</div>
+            <div className="tg-empty-icon">{emptyStateIcon}</div>
+            <div className="tg-empty-t">{emptyStateTitle}</div>
+            <div className="tg-empty-s">{emptyStateSubtitle}</div>
           </div>
         )}
         <ReactFlow
@@ -3199,7 +3896,7 @@ export default function App() {
           nodes={styledNodes}
           nodeTypes={nodeTypes}
           edgeTypes={edgeTypes}
-          edges={edges.map(e=>({...e,
+          edges={filteredEdges.map(e=>({...e,
             type:"dependency",
             animated:true,
             className:"tg-dependency-edge",
@@ -3236,15 +3933,29 @@ export default function App() {
         </ReactFlow>
       </div>
 
-      {/* ══ TOASTS ══ */}
-      <div className="tg-toasts">
-        {toasts.map(t=>(
-          <div key={t.id} className={`tg-toast tg-t-${t.type}`} onClick={()=>dismiss(t.id)}>
-            <span>{t.type==="success"?"✓":t.type==="error"?"✕":t.type==="warn"?"⚠":"ℹ"}</span>
-            <span style={{flex:1}}>{t.msg}</span>
-          </div>
-        ))}
+        {/* ══ TOASTS ══ */}
+        <div className="tg-toasts">
+          {toasts.map(t=>(
+            <div
+              key={t.id}
+              className={`tg-toast tg-t-${t.type}`}
+              onClick={()=>dismiss(t.id)}
+              role="status"
+              aria-live="polite"
+            >
+              <span className="tg-toast-icon">
+                {t.type==="success"?"✓":t.type==="error"?"✕":t.type==="warn"?"⚠":"ℹ"}
+              </span>
+              <div className="tg-toast-body">
+                {t.title && <div className="tg-toast-title">{t.title}</div>}
+                <div className={`tg-toast-msg ${t.title ? "" : "tg-toast-msg--solo"}`.trim()}>
+                  {t.msg}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
-    </div>
+    </>
   );
 }

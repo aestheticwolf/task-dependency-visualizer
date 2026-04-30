@@ -2,6 +2,13 @@ import React, { useState } from "react";
 import { createUserWithEmailAndPassword } from "firebase/auth";
 import { auth } from "./firebase";
 import {
+  formatAuthMessage,
+  hasValidationErrors,
+  PASSWORD_MIN_LENGTH,
+  validateEmailAddress,
+  validateSignupForm,
+} from "./authValidation";
+import {
   AuthLogo,
   AuthShell,
   AuthTabs,
@@ -29,27 +36,38 @@ export default function Signup({ onModeChange, onAuthSuccess, onBack, darkTheme,
   const [password, setPassword] = useState("");
   const [showPw,   setShowPw]   = useState(false);
   const [loading,  setLoading]  = useState(false);
-  const [error,    setError]    = useState("");
+  const [feedback, setFeedback] = useState(null);
+  const [fieldErrors, setFieldErrors] = useState({ email: "", password: "" });
   useAuthStyles();
   const dark = Boolean(darkTheme);
   const setDark = setDarkTheme;
 
   const handleSignup = async () => {
-    if (!email || !password) return;
+    const trimmedEmail = email.trim();
+    const nextErrors = validateSignupForm({ email: trimmedEmail, password });
+
+    setFieldErrors(nextErrors);
+    setFeedback(null);
+
+    if (hasValidationErrors(nextErrors)) {
+      return;
+    }
+
     setLoading(true);
-    setError("");
+    setEmail(trimmedEmail);
     try {
-      const res = await createUserWithEmailAndPassword(auth, email, password);
+      const res = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
       onAuthSuccess?.(res.user);
     } catch (err) {
-      setError(err.message.replace("Firebase: ", "").replace(/\(auth\/.*?\)\.?/g, "").trim());
+      setFeedback({ type: "error", message: formatAuthMessage(err, "signup") });
     } finally {
       setLoading(false);
     }
   };
 
   const goToLogin = () => {
-    setError("");
+    setFeedback(null);
+    setFieldErrors({ email: "", password: "" });
     setShowPw(false);
     onModeChange?.("login");
   };
@@ -66,49 +84,93 @@ export default function Signup({ onModeChange, onAuthSuccess, onBack, darkTheme,
         onSelectSignup={() => {}}
       />
 
-      {error && (
-        <div className="auth-err">
-          <span>⚠️</span>
-          <span>{error}</span>
+      {feedback?.message && (
+        <div className="auth-err" role="alert" aria-live="polite">
+          <span>!</span>
+          <span>{feedback.message}</span>
         </div>
       )}
 
       <div className="auth-fields">
         <div className="auth-field">
-          <span className="auth-field-icon">✉️</span>
-          <input
-            className="auth-input"
-            type="email"
-            placeholder="Email address"
-            value={email}
-            onChange={e => { setEmail(e.target.value); setError(""); }}
-            onKeyDown={onKey}
-            autoComplete="email"
-          />
-          <div className="auth-field-line" />
+          <div className="auth-input-row">
+            <span className="auth-field-icon">✉️</span>
+            <input
+              className="auth-input"
+              type="email"
+              placeholder="Email address"
+              value={email}
+              onChange={e => {
+                const nextEmail = e.target.value;
+                setEmail(nextEmail);
+                setFeedback(null);
+                setFieldErrors(prev =>
+                  prev.email ? { ...prev, email: validateEmailAddress(nextEmail.trim()) } : prev
+                );
+              }}
+              onBlur={() =>
+                setFieldErrors(prev => ({ ...prev, email: validateEmailAddress(email.trim()) }))
+              }
+              onKeyDown={onKey}
+              autoComplete="email"
+              aria-invalid={Boolean(fieldErrors.email)}
+              aria-describedby={fieldErrors.email ? "signup-email-error" : undefined}
+            />
+            <div className="auth-field-line" />
+          </div>
+          {fieldErrors.email && (
+            <div id="signup-email-error" className="auth-field-msg is-error">
+              {fieldErrors.email}
+            </div>
+          )}
         </div>
 
         <div className="auth-field">
-          <span className="auth-field-icon">🔑</span>
-          <input
-            className="auth-input has-toggle"
-            type={showPw ? "text" : "password"}
-            placeholder="Password (min. 6 chars)"
-            value={password}
-            onChange={e => { setPassword(e.target.value); setError(""); }}
-            onKeyDown={onKey}
-            autoComplete="new-password"
-          />
-          <button
-            type="button"
-            className="auth-pw-toggle"
-            onClick={() => setShowPw(v => !v)}
-            tabIndex={-1}
-            aria-label={showPw ? "Hide password" : "Show password"}
+          <div className="auth-input-row">
+            <span className="auth-field-icon">🔑</span>
+            <input
+              className="auth-input has-toggle"
+              type={showPw ? "text" : "password"}
+              placeholder={`Password (min. ${PASSWORD_MIN_LENGTH} chars)`}
+              value={password}
+              onChange={e => {
+                const nextPassword = e.target.value;
+                setPassword(nextPassword);
+                setFeedback(null);
+                setFieldErrors(prev =>
+                  prev.password
+                    ? { ...prev, password: validateSignupForm({ email: email.trim(), password: nextPassword }).password }
+                    : prev
+                );
+              }}
+              onBlur={() =>
+                setFieldErrors(prev => ({
+                  ...prev,
+                  password: validateSignupForm({ email: email.trim(), password }).password,
+                }))
+              }
+              onKeyDown={onKey}
+              autoComplete="new-password"
+              aria-invalid={Boolean(fieldErrors.password)}
+              aria-describedby="signup-password-message"
+            />
+            <button
+              type="button"
+              className="auth-pw-toggle"
+              onClick={() => setShowPw(v => !v)}
+              tabIndex={-1}
+              aria-label={showPw ? "Hide password" : "Show password"}
+            >
+              {showPw ? "Hide" : "Show"}
+            </button>
+            <div className="auth-field-line" />
+          </div>
+          <div
+            id="signup-password-message"
+            className={`auth-field-msg ${fieldErrors.password ? "is-error" : ""}`.trim()}
           >
-            {showPw ? "Hide" : "Show"}
-          </button>
-          <div className="auth-field-line" />
+            {fieldErrors.password || `Use at least ${PASSWORD_MIN_LENGTH} characters. Adding letters, numbers, and symbols is recommended.`}
+          </div>
         </div>
 
         {strength && (
@@ -129,12 +191,13 @@ export default function Signup({ onModeChange, onAuthSuccess, onBack, darkTheme,
       </div>
 
       <button
+        type="button"
         className="auth-btn m-signup"
         onClick={handleSignup}
-        disabled={!email || !password || loading}
+        disabled={loading}
       >
         {loading && <span className="auth-spinner" />}
-        {loading ? "Please wait…" : "Create Account  →"}
+        {loading ? "Please wait..." : "Create Account  →"}
       </button>
 
       <p className="auth-footer">

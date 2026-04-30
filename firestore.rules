@@ -1,0 +1,63 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner(userId) {
+      return request.auth != null && request.auth.uid == userId;
+    }
+
+    function isValidNode(document) {
+      return document.keys().hasOnly(["id", "data", "position"])
+        && document.id is string
+        && document.id.size() > 0
+        && document.data is map
+        && document.data.keys().hasOnly(["label", "completed"])
+        && document.data.label is string
+        && document.data.label.size() > 0
+        && document.data.label.size() <= 120
+        && document.data.completed is bool
+        && document.position is map
+        && document.position.keys().hasOnly(["x", "y"])
+        && document.position.x is number
+        && document.position.y is number;
+    }
+
+    function dependencyDocId(sourceId, targetId) {
+      return sourceId + "__" + targetId;
+    }
+
+    function dependencyEdgeId(sourceId, targetId) {
+      return "e" + sourceId + "-" + targetId;
+    }
+
+    function isValidEdge(document, edgeDocId) {
+      return document.keys().hasOnly(["id", "source", "target", "animated"])
+        && document.id is string
+        && document.source is string
+        && document.target is string
+        && document.source.size() > 0
+        && document.target.size() > 0
+        && document.source != document.target
+        && document.animated is bool
+        && edgeDocId == dependencyDocId(document.source, document.target)
+        && document.id == dependencyEdgeId(document.source, document.target);
+    }
+
+    match /users/{userId} {
+      allow read, write: if false;
+
+      match /nodes/{nodeDocId} {
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId) && isValidNode(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+
+      match /edges/{edgeDocId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidEdge(request.resource.data, edgeDocId);
+        allow update: if false;
+        allow delete: if isOwner(userId);
+      }
+    }
+  }
+}
