@@ -1,9 +1,14 @@
-function titleCaseWord(word = "") {
+type UserLike = {
+  displayName?: string | null;
+  email?: string | null;
+} | null | undefined;
+
+function titleCaseWord(word = ""): string {
   if (!word) return "";
   return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
 }
 
-export function formatUserDisplayName(user) {
+export function formatUserDisplayName(user: UserLike): string {
   const directName = typeof user?.displayName === "string" ? user.displayName.trim() : "";
   if (directName) return directName;
 
@@ -26,7 +31,7 @@ export function formatUserDisplayName(user) {
     .join(" ");
 }
 
-export function getUserInitial(user) {
+export function getUserInitial(user: UserLike): string {
   const displayName = formatUserDisplayName(user);
   const firstChar = displayName.match(/[A-Za-z0-9]/)?.[0] || "U";
   return firstChar.toUpperCase();

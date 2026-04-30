@@ -93,7 +93,9 @@ test("summarizes multiple blocked prerequisites concisely", () => {
       { id: "2", data: { label: "API Review", completed: false } },
       { id: "3", data: { label: "QA Testing", completed: false } },
     ])
-  ).toBe('Waiting on "Design Mockup", "API Review", and 1 more to be completed before this task can start.');
+  ).toBe(
+    'Waiting on "Design Mockup", "API Review", and 1 more to be completed before this task can start.'
+  );
 });
 
 test("returns workflow statuses for ready, blocked, unlinked, and completed tasks", () => {

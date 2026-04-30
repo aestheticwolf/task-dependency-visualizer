@@ -3,14 +3,44 @@ export const DISPLAY_NAME_MAX_LENGTH = 60;
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function sanitizeFirebaseMessage(message) {
+export type AuthContext = "default" | "login" | "signup" | "passwordReset";
+
+export type LoginFormValues = {
+  email: string;
+  password: string;
+};
+
+export type SignupFormValues = LoginFormValues & {
+  name: string;
+};
+
+export type LoginFormErrors = {
+  email: string;
+  password: string;
+};
+
+export type SignupFormErrors = LoginFormErrors & {
+  name: string;
+};
+
+export type PasswordStrength = {
+  level: 0 | 1 | 2 | 3 | 4;
+  label: "" | "Weak" | "Fair" | "Good" | "Strong";
+};
+
+type AuthErrorLike = {
+  code?: string;
+  message?: string;
+} | null | undefined;
+
+function sanitizeFirebaseMessage(message?: string): string {
   return (message || "")
     .replace("Firebase: ", "")
     .replace(/\(auth\/.*?\)\.?/g, "")
     .trim();
 }
 
-export function validateEmailAddress(email) {
+export function validateEmailAddress(email: string): string {
   if (!email) {
     return "Enter your email address.";
   }
@@ -22,11 +52,11 @@ export function validateEmailAddress(email) {
   return "";
 }
 
-export function normalizeDisplayName(name) {
+export function normalizeDisplayName(name: string): string {
   return (name || "").trim().replace(/\s+/g, " ");
 }
 
-export function validateDisplayName(name) {
+export function validateDisplayName(name: string): string {
   const normalizedName = normalizeDisplayName(name);
 
   if (!normalizedName) {
@@ -44,14 +74,18 @@ export function validateDisplayName(name) {
   return "";
 }
 
-export function validateLoginForm({ email, password }) {
+export function validateLoginForm({ email, password }: LoginFormValues): LoginFormErrors {
   return {
     email: validateEmailAddress(email),
     password: password ? "" : "Enter your password.",
   };
 }
 
-export function validateSignupForm({ name, email, password }) {
+export function validateSignupForm({
+  name,
+  email,
+  password,
+}: SignupFormValues): SignupFormErrors {
   let passwordError = "";
 
   if (!password) {
@@ -67,17 +101,17 @@ export function validateSignupForm({ name, email, password }) {
   };
 }
 
-export function getPasswordStrength(password) {
+export function getPasswordStrength(password: string): PasswordStrength {
   if (!password) {
     return { level: 0, label: "" };
   }
 
   let score = 0;
 
-  if (password.length >= PASSWORD_MIN_LENGTH) score++;
-  if (password.length >= 10) score++;
-  if (/[A-Z]/.test(password) || /[0-9]/.test(password)) score++;
-  if (/[^A-Za-z0-9]/.test(password)) score++;
+  if (password.length >= PASSWORD_MIN_LENGTH) score += 1;
+  if (password.length >= 10) score += 1;
+  if (/[A-Z]/.test(password) || /[0-9]/.test(password)) score += 1;
+  if (/[^A-Za-z0-9]/.test(password)) score += 1;
 
   if (score <= 1) return { level: 1, label: "Weak" };
   if (score === 2) return { level: 2, label: "Fair" };
@@ -86,11 +120,11 @@ export function getPasswordStrength(password) {
   return { level: 4, label: "Strong" };
 }
 
-export function hasValidationErrors(errors) {
+export function hasValidationErrors(errors: Record<string, string>): boolean {
   return Object.values(errors).some(Boolean);
 }
 
-export function formatAuthMessage(error, context = "default") {
+export function formatAuthMessage(error: AuthErrorLike, context: AuthContext = "default"): string {
   const code = error?.code || "";
 
   switch (code) {

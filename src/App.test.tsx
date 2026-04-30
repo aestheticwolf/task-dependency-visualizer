@@ -2,10 +2,10 @@ import {
   buildGraph,
   formatUnlinkedTaskMessage,
   getBlockingTasks,
-  getTaskDependencies,
-  hasLinkedDependency,
   getPendingTaskBlockMessage,
+  getTaskDependencies,
   hasCycle,
+  hasLinkedDependency,
   isBlocked,
 } from "./taskLogic";
 import { formatUserDisplayName, getUserInitial } from "./userDisplay";
@@ -25,9 +25,7 @@ const nodes = [
   },
 ];
 
-const edges = [
-  { id: "e1-2", source: "1", target: "2" },
-];
+const edges = [{ id: "e1-2", source: "1", target: "2" }];
 
 test("returns a professional blocked message for pending linked prerequisites", () => {
   expect(isBlocked("2", edges, nodes)).toBe(true);
@@ -88,10 +86,12 @@ test("still detects circular dependencies", () => {
 });
 
 test("uses the profile display name when it exists", () => {
-  expect(formatUserDisplayName({
-    displayName: "Test User",
-    email: "test@gmail.com",
-  })).toBe("Test User");
+  expect(
+    formatUserDisplayName({
+      displayName: "Test User",
+      email: "test@gmail.com",
+    })
+  ).toBe("Test User");
 });
 
 test("falls back to a friendly name from email", () => {

@@ -1,9 +1,28 @@
-function normalizeHour(hour) {
+type WelcomePeriod = {
+  kicker: string;
+  title: string;
+  icon: string;
+  detail: string;
+};
+
+type WelcomeBanner = {
+  kicker: string;
+  greeting: string;
+  name: string;
+  icon: string;
+  detail: string;
+};
+
+type HourSource = {
+  getHours(): number;
+};
+
+function normalizeHour(hour: number): number {
   if (!Number.isFinite(hour)) return 9;
   return ((Math.trunc(hour) % 24) + 24) % 24;
 }
 
-export function getWelcomePeriod(hour) {
+export function getWelcomePeriod(hour: number): WelcomePeriod {
   const safeHour = normalizeHour(hour);
 
   if (safeHour < 5) {
@@ -50,7 +69,7 @@ export function getWelcomePeriod(hour) {
   };
 }
 
-export function buildWelcomeBanner(name, date = new Date()) {
+export function buildWelcomeBanner(name: string, date: HourSource = new Date()): WelcomeBanner {
   const displayName = String(name || "").trim() || "there";
   const period = getWelcomePeriod(date.getHours());
 

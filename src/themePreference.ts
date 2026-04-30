@@ -2,7 +2,10 @@ import { useCallback, useEffect, useSyncExternalStore } from "react";
 
 const THEME_KEY = "tg-dark";
 
-function readThemePreference() {
+type ThemeListener = () => void;
+type ThemeUpdater = boolean | ((currentValue: boolean) => boolean);
+
+function readThemePreference(): boolean {
   try {
     return localStorage.getItem(THEME_KEY) !== "false";
   } catch {
@@ -11,17 +14,17 @@ function readThemePreference() {
 }
 
 let themeValue = readThemePreference();
-const listeners = new Set();
+const listeners = new Set<ThemeListener>();
 let storageListenerAttached = false;
 
-function notifyThemeListeners() {
-  listeners.forEach(listener => listener());
+function notifyThemeListeners(): void {
+  listeners.forEach((listener) => listener());
 }
 
-function attachStorageListener() {
+function attachStorageListener(): void {
   if (storageListenerAttached || typeof window === "undefined") return;
 
-  window.addEventListener("storage", event => {
+  window.addEventListener("storage", (event) => {
     if (event.key && event.key !== THEME_KEY) return;
     themeValue = readThemePreference();
     notifyThemeListeners();
@@ -30,7 +33,7 @@ function attachStorageListener() {
   storageListenerAttached = true;
 }
 
-function setThemeValue(nextDark) {
+function setThemeValue(nextDark: boolean): void {
   themeValue = nextDark;
   try {
     localStorage.setItem(THEME_KEY, String(nextDark));
@@ -38,7 +41,7 @@ function setThemeValue(nextDark) {
   notifyThemeListeners();
 }
 
-function subscribe(listener) {
+function subscribe(listener: ThemeListener): () => void {
   attachStorageListener();
   listeners.add(listener);
   return () => {
@@ -46,7 +49,7 @@ function subscribe(listener) {
   };
 }
 
-function getSnapshot() {
+function getSnapshot(): boolean {
   return themeValue;
 }
 
@@ -60,11 +63,12 @@ export function useThemePreference() {
     document.body?.setAttribute("data-tg-theme", dark ? "dark" : "light");
   }, [dark]);
 
-  const setDark = useCallback(updater => {
+  const setDark = useCallback((updater: ThemeUpdater) => {
     const resolved =
       typeof updater === "function"
-        ? Boolean(updater(themeValue))
+        ? Boolean((updater as (currentValue: boolean) => boolean)(themeValue))
         : Boolean(updater);
+
     setThemeValue(resolved);
   }, []);
 
