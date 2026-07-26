@@ -108,17 +108,27 @@ test("rejects dependencies that point to missing tasks", () => {
   ).toThrow("Dependency 1 references a task that does not exist in this file.");
 });
 
-test("rejects circular dependencies during import", () => {
+test("allows circular dependencies during import so the full chart can be visualized", () => {
   expect(
-    () =>
-      parseBoardImportFile(
-        JSON.stringify({
-          nodes: sampleNodes,
-          edges: [
-            { source: "1", target: "2" },
-            { source: "2", target: "1" },
-          ],
-        })
-      )
-  ).toThrow("This board file contains circular dependencies. Remove the cycle and try again.");
+    parseBoardImportFile(
+      JSON.stringify({
+        nodes: sampleNodes,
+        edges: [
+          { source: "1", target: "2" },
+          { source: "2", target: "1" },
+        ],
+      })
+    )
+  ).toEqual({
+    app: "",
+    version: null,
+    exportedAt: "",
+    exportedBy: "",
+    layoutDirection: null,
+    nodes: sampleNodes,
+    edges: [
+      { id: "e1-2", source: "1", target: "2", animated: true },
+      { id: "e2-1", source: "2", target: "1", animated: true },
+    ],
+  });
 });

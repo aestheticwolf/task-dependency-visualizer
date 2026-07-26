@@ -2,6 +2,9 @@ import {
   buildDependencyDocId,
   buildDependencyEdgeId,
   formatBlockedTaskSummary,
+  getCircularDependencyEdgeIds,
+  getCircularDependencyGroups,
+  getCircularDependencyNodeIds,
   getTaskStatusSummary,
   getTaskWorkflowStatus,
   matchesTaskSearch,
@@ -32,6 +35,7 @@ test("returns explicit feedback for self-links", () => {
     code: "self-link",
     type: "warn",
     message: "A task cannot depend on itself. Choose two different tasks.",
+    blocking: true,
   });
 });
 
@@ -47,6 +51,7 @@ test("rejects links when selected tasks no longer exist", () => {
     code: "missing-task",
     type: "warn",
     message: "One or both selected tasks no longer exist. Refresh the task list and try again.",
+    blocking: true,
   });
 });
 
@@ -62,6 +67,7 @@ test("rejects duplicate dependencies", () => {
     code: "duplicate",
     type: "warn",
     message: "Dependency already exists.",
+    blocking: true,
   });
 });
 
@@ -77,6 +83,24 @@ test("rejects circular dependencies", () => {
     code: "cycle",
     type: "error",
     message: "Circular dependency detected. Choose a different task relationship.",
+    blocking: true,
+  });
+});
+
+test("allows circular dependencies when explicitly enabled for visualization", () => {
+  expect(
+    validateDependencyLink({
+      sourceId: "2",
+      targetId: "1",
+      nodes,
+      edges: [{ id: "e1-2", source: "1", target: "2" }],
+      allowCycle: true,
+    })
+  ).toEqual({
+    code: "cycle",
+    type: "warn",
+    message: "This link creates a circular dependency. It will be highlighted in Cycles and Details.",
+    blocking: false,
   });
 });
 
@@ -120,6 +144,46 @@ test("matches task view filters using workflow status", () => {
   expect(matchesTaskViewFilter(nodes[1], workflowEdges, nodes, "blocked")).toBe(true);
   expect(matchesTaskViewFilter(nodes[2], workflowEdges, nodes, "unlinked")).toBe(true);
   expect(matchesTaskViewFilter(nodes[0], workflowEdges, nodes, "complete")).toBe(false);
+});
+
+test("detects circular dependency groups, nodes, and edges", () => {
+  const cycleNodes = [
+    ...nodes,
+    { id: "4", data: { label: "Release", completed: false } },
+  ];
+  const cycleEdges = [
+    { id: "e1-2", source: "1", target: "2" },
+    { id: "e2-3", source: "2", target: "3" },
+    { id: "e3-1", source: "3", target: "1" },
+    { id: "e3-4", source: "3", target: "4" },
+  ];
+
+  expect(getCircularDependencyGroups(cycleNodes, cycleEdges)).toEqual([
+    {
+      nodeIds: ["1", "2", "3"],
+      edgeIds: ["e1-2", "e2-3", "e3-1"],
+    },
+  ]);
+  expect(getCircularDependencyNodeIds(cycleNodes, cycleEdges)).toEqual(["1", "2", "3"]);
+  expect(getCircularDependencyEdgeIds(cycleNodes, cycleEdges)).toEqual(["e1-2", "e2-3", "e3-1"]);
+});
+
+test("matches the cycle filter using detected circular dependency ids", () => {
+  const cycleEdges = [
+    { id: "e1-2", source: "1", target: "2" },
+    { id: "e2-3", source: "2", target: "3" },
+    { id: "e3-1", source: "3", target: "1" },
+  ];
+  const cycleNodeIds = new Set(getCircularDependencyNodeIds(nodes, cycleEdges));
+
+  expect(matchesTaskViewFilter(nodes[0], cycleEdges, nodes, "cycle", cycleNodeIds)).toBe(true);
+  expect(matchesTaskViewFilter(
+    { id: "4", data: { label: "Release", completed: false } },
+    cycleEdges,
+    [...nodes, { id: "4", data: { label: "Release", completed: false } }],
+    "cycle",
+    cycleNodeIds
+  )).toBe(false);
 });
 
 test("matches task search case-insensitively", () => {

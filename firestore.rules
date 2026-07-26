@@ -2,8 +2,21 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
     function isOwner(userId) {
-      return request.auth != null && request.auth.uid == userId;
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function canAccessBoard(userId) {
+      return isOwner(userId) || isAdmin();
     }
 
     function isValidNode(document) {
@@ -37,26 +50,130 @@ service cloud.firestore {
         && document.target is string
         && document.source.size() > 0
         && document.target.size() > 0
-        && document.source != document.target
         && document.animated is bool
         && edgeDocId == dependencyDocId(document.source, document.target)
         && document.id == dependencyEdgeId(document.source, document.target);
     }
 
+    function isValidUserProfile(document, userId) {
+      return document.keys().hasOnly([
+          "uid",
+          "email",
+          "displayName",
+          "taskCount",
+          "completedCount",
+          "pendingCount",
+          "blockedCount",
+          "readyCount",
+          "unlinkedCount",
+          "circularCount",
+          "dependencyCount",
+          "updatedAt"
+        ])
+        && document.uid is string
+        && document.uid == userId
+        && document.email is string
+        && document.email.size() <= 320
+        && document.displayName is string
+        && document.displayName.size() <= 120
+        && document.taskCount is number
+        && document.taskCount >= 0
+        && document.completedCount is number
+        && document.completedCount >= 0
+        && document.pendingCount is number
+        && document.pendingCount >= 0
+        && document.blockedCount is number
+        && document.blockedCount >= 0
+        && document.readyCount is number
+        && document.readyCount >= 0
+        && document.unlinkedCount is number
+        && document.unlinkedCount >= 0
+        && document.circularCount is number
+        && document.circularCount >= 0
+        && document.dependencyCount is number
+        && document.dependencyCount >= 0
+        && document.updatedAt is string
+        && document.updatedAt.size() <= 40;
+    }
+
+    function isValidBoardProfile(document) {
+      return document.keys().hasOnly([
+          "name",
+          "taskCount",
+          "completedCount",
+          "pendingCount",
+          "blockedCount",
+          "readyCount",
+          "unlinkedCount",
+          "circularCount",
+          "dependencyCount",
+          "updatedAt"
+        ])
+        && document.name is string
+        && document.name.size() > 0
+        && document.name.size() <= 120
+        && document.taskCount is number
+        && document.taskCount >= 0
+        && document.completedCount is number
+        && document.completedCount >= 0
+        && document.pendingCount is number
+        && document.pendingCount >= 0
+        && document.blockedCount is number
+        && document.blockedCount >= 0
+        && document.readyCount is number
+        && document.readyCount >= 0
+        && document.unlinkedCount is number
+        && document.unlinkedCount >= 0
+        && document.circularCount is number
+        && document.circularCount >= 0
+        && document.dependencyCount is number
+        && document.dependencyCount >= 0
+        && document.updatedAt is string
+        && document.updatedAt.size() <= 40;
+    }
+
+    match /admins/{adminId} {
+      allow read: if isOwner(adminId);
+      allow write: if false;
+    }
+
     match /users/{userId} {
-      allow read, write: if false;
+      allow read: if canAccessBoard(userId);
+      allow create, update: if canAccessBoard(userId)
+        && isValidUserProfile(request.resource.data, userId);
+      allow delete: if false;
+
+      match /boards/{boardId} {
+        allow read: if canAccessBoard(userId);
+        allow create, update: if canAccessBoard(userId)
+          && isValidBoardProfile(request.resource.data);
+        allow delete: if canAccessBoard(userId);
+
+        match /nodes/{nodeDocId} {
+          allow read: if canAccessBoard(userId);
+          allow create, update: if canAccessBoard(userId) && isValidNode(request.resource.data);
+          allow delete: if canAccessBoard(userId);
+        }
+
+        match /edges/{edgeDocId} {
+          allow read: if canAccessBoard(userId);
+          allow create: if canAccessBoard(userId) && isValidEdge(request.resource.data, edgeDocId);
+          allow update: if false;
+          allow delete: if canAccessBoard(userId);
+        }
+      }
 
       match /nodes/{nodeDocId} {
-        allow read: if isOwner(userId);
-        allow create, update: if isOwner(userId) && isValidNode(request.resource.data);
-        allow delete: if isOwner(userId);
+        allow read: if canAccessBoard(userId);
+        allow create, update: if canAccessBoard(userId) && isValidNode(request.resource.data);
+        allow delete: if canAccessBoard(userId);
       }
 
       match /edges/{edgeDocId} {
-        allow read: if isOwner(userId);
-        allow create: if isOwner(userId) && isValidEdge(request.resource.data, edgeDocId);
+        allow read: if canAccessBoard(userId);
+        allow create: if canAccessBoard(userId) && isValidEdge(request.resource.data, edgeDocId);
         allow update: if false;
-        allow delete: if isOwner(userId);
+        allow delete: if canAccessBoard(userId);
       }
     }
   }

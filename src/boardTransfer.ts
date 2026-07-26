@@ -1,8 +1,6 @@
 import {
   buildDependencyDocId,
   buildDependencyEdgeId,
-  buildGraph,
-  hasCycle,
   type TaskEdge,
   type TaskNode,
 } from "./taskLogic";
@@ -138,10 +136,6 @@ function parseEdge(
     throw new Error(`Dependency ${index + 1} is missing its linked tasks.`);
   }
 
-  if (source === target) {
-    throw new Error(`Dependency ${index + 1} links a task to itself.`);
-  }
-
   if (!nodeIds.has(source) || !nodeIds.has(target)) {
     throw new Error(`Dependency ${index + 1} references a task that does not exist in this file.`);
   }
@@ -205,10 +199,6 @@ export function parseBoardImportFile(fileText: string): ParsedBoardImport {
   const edges = boardPayload.edges.map((edge, index) =>
     parseEdge(edge as RawBoardEdge, index, nodeIds, seenDependencies)
   );
-
-  if (hasCycle(buildGraph(edges))) {
-    throw new Error("This board file contains circular dependencies. Remove the cycle and try again.");
-  }
 
   return {
     app: typeof boardPayload.app === "string" ? boardPayload.app : "",

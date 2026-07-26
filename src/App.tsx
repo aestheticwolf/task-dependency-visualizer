@@ -15,16 +15,21 @@ import {
   parseBoardImportFile,
 } from "./boardTransfer";
 import {
+  buildAdminBoardSummary,
+  buildAdminUserProfile,
+  matchesAdminUserSearch,
+  normalizeAdminUserProfile,
+  sortAdminUsers,
+} from "./adminLogic";
+import {
   buildDependencyDocId,
   buildDependencyEdgeId,
   formatBlockedTaskMessage,
   formatBlockedTaskSummary,
-  formatUnlinkedTaskMessage,
+  getCircularDependencyGroups,
   getBlockingTasks,
-  getTaskStatusSummary,
   getTaskDependencies,
   getTaskWorkflowStatus,
-  hasLinkedDependency,
   isBlocked,
   matchesTaskSearch,
   matchesTaskViewFilter,
@@ -32,8 +37,8 @@ import {
 } from "./taskLogic";
 import { formatUserDisplayName, getUserInitial } from "./userDisplay";
 import {
-  collection, addDoc, getDocs, deleteDoc,
-  doc, onSnapshot, runTransaction, updateDoc, writeBatch,
+  collection, getDocs, deleteDoc,
+  doc, onSnapshot, runTransaction, setDoc, updateDoc, writeBatch,
 } from "firebase/firestore";
 import { MiniMap, Controls, Background, Handle, Position, applyNodeChanges, useNodeId, useUpdateNodeInternals } from "reactflow";
 
@@ -42,6 +47,10 @@ const ROUTES = Object.freeze({
   login: "/login",
   signup: "/signup",
   dashboard: "/dashboard",
+  tasks: "/tasks",
+  details: "/details",
+  cycles: "/cycles",
+  admin: "/admin",
   profile: "/profile",
 });
 
@@ -123,6 +132,17 @@ const LAYOUT_OPTIONS = Object.freeze([
 
 const VALID_LAYOUT_DIRECTIONS = new Set(LAYOUT_OPTIONS.map(option=>option.value));
 const FIRESTORE_BATCH_LIMIT = 400;
+const DEFAULT_BOARD_ID = "main";
+const DEFAULT_BOARD_NAME = "Main Board";
+
+function toSafeNonNegativeNumber(value) {
+  const nextValue = Number(value);
+  if (!Number.isFinite(nextValue) || nextValue < 0) {
+    return 0;
+  }
+
+  return Math.round(nextValue);
+}
 
 function createBoardExportFilename(date = new Date()) {
   const stamp = [
@@ -132,6 +152,96 @@ function createBoardExportFilename(date = new Date()) {
   ].join("-");
 
   return `taskgraph-board-${stamp}.json`;
+}
+
+function normalizeBoardName(name = "") {
+  const trimmedName = String(name || "").trim();
+  if (!trimmedName) {
+    return "";
+  }
+
+  return trimmedName.slice(0, 80);
+}
+
+function buildBoardProfile({name = DEFAULT_BOARD_NAME} = {}, nodes = [], edges = [], now = new Date()) {
+  return {
+    name: normalizeBoardName(name) || DEFAULT_BOARD_NAME,
+    updatedAt: now.toISOString(),
+    ...buildAdminBoardSummary(nodes, edges),
+  };
+}
+
+function normalizeBoardProfile(value, fallbackId = DEFAULT_BOARD_ID) {
+  return {
+    id: String(fallbackId || DEFAULT_BOARD_ID),
+    name: normalizeBoardName(value?.name) || DEFAULT_BOARD_NAME,
+    updatedAt: String(value?.updatedAt || ""),
+    taskCount: toSafeNonNegativeNumber(value?.taskCount),
+    completedCount: toSafeNonNegativeNumber(value?.completedCount),
+    pendingCount: toSafeNonNegativeNumber(value?.pendingCount),
+    blockedCount: toSafeNonNegativeNumber(value?.blockedCount),
+    readyCount: toSafeNonNegativeNumber(value?.readyCount),
+    unlinkedCount: toSafeNonNegativeNumber(value?.unlinkedCount),
+    circularCount: toSafeNonNegativeNumber(value?.circularCount),
+    dependencyCount: toSafeNonNegativeNumber(value?.dependencyCount),
+  };
+}
+
+function sortBoardProfiles(profiles = []) {
+  return [...profiles].sort((left, right) => {
+    const rightUpdatedAt = Date.parse(right.updatedAt || "");
+    const leftUpdatedAt = Date.parse(left.updatedAt || "");
+    const rightUpdatedValue = Number.isFinite(rightUpdatedAt) ? rightUpdatedAt : 0;
+    const leftUpdatedValue = Number.isFinite(leftUpdatedAt) ? leftUpdatedAt : 0;
+
+    if (rightUpdatedValue !== leftUpdatedValue) {
+      return rightUpdatedValue - leftUpdatedValue;
+    }
+
+    return left.name.localeCompare(right.name, undefined, {numeric: true, sensitivity: "base"});
+  });
+}
+
+function getUserBoardsCollection(userId) {
+  return collection(db, "users", userId, "boards");
+}
+
+function getUserBoardDoc(userId, boardId) {
+  return doc(db, "users", userId, "boards", boardId);
+}
+
+function getUserNodesCollection(userId, boardId = "") {
+  return boardId
+    ? collection(db, "users", userId, "boards", boardId, "nodes")
+    : collection(db, "users", userId, "nodes");
+}
+
+function getUserEdgesCollection(userId, boardId = "") {
+  return boardId
+    ? collection(db, "users", userId, "boards", boardId, "edges")
+    : collection(db, "users", userId, "edges");
+}
+
+function getUserNodeDoc(userId, nodeId, boardId = "") {
+  return boardId
+    ? doc(db, "users", userId, "boards", boardId, "nodes", nodeId)
+    : doc(db, "users", userId, "nodes", nodeId);
+}
+
+function getUserEdgeDoc(userId, edgeDocId, boardId = "") {
+  return boardId
+    ? doc(db, "users", userId, "boards", boardId, "edges", edgeDocId)
+    : doc(db, "users", userId, "edges", edgeDocId);
+}
+
+async function commitFirestoreOperations(operations = []) {
+  for (let start = 0; start < operations.length; start += FIRESTORE_BATCH_LIMIT) {
+    const batch = writeBatch(db);
+    operations
+      .slice(start, start + FIRESTORE_BATCH_LIMIT)
+      .forEach(applyOperation => applyOperation(batch));
+    await batch.commit();
+  }
 }
 
 function getLayoutConfig(direction = "TB") {
@@ -222,9 +332,11 @@ button, input, select, textarea {
   --status-complete: #10b981;
   --status-pending:  #f59e0b;
   --status-blocked:  #ef4444;
+  --status-cycle:    #f97316;
   --status-complete-bg: rgba(16,185,129,0.14);
   --status-pending-bg:  rgba(245,158,11,0.13);
   --status-blocked-bg:  rgba(239,68,68,0.12);
+  --status-cycle-bg:    rgba(249,115,22,0.14);
   --shell-glow-a: rgba(0,212,255,0.16);
   --shell-glow-b: rgba(56,189,248,0.12);
   --shell-glow-c: rgba(124,58,237,0.14);
@@ -254,9 +366,11 @@ button, input, select, textarea {
   --status-complete: #059669;
   --status-pending:  #d97706;
   --status-blocked:  #dc2626;
+  --status-cycle:    #ea580c;
   --status-complete-bg: rgba(209,250,229,0.88);
   --status-pending-bg:  rgba(254,243,199,0.9);
   --status-blocked-bg:  rgba(254,226,226,0.88);
+  --status-cycle-bg:    rgba(255,237,213,0.94);
   --shell-glow-a: rgba(56,189,248,0.16);
   --shell-glow-b: rgba(99,102,241,0.1);
   --shell-glow-c: rgba(16,185,129,0.1);
@@ -272,7 +386,7 @@ button, input, select, textarea {
 
 /* ══ App shell ══ */
 .tg-shell {
-  display: flex; height: 100vh; overflow: hidden;
+  display: flex; height: 100vh; min-height: 100dvh; overflow: hidden; overflow-x: hidden;
   font-family: 'Open Sans', sans-serif;
   font-size: 14px;
   line-height: 1.5;
@@ -306,7 +420,7 @@ button, input, select, textarea {
 
 /* ══ Panel ══ */
 .tg-panel {
-  width: 300px; flex-shrink: 0;
+  width: clamp(280px, 24vw, 320px); flex-shrink: 0;
   background: var(--panel-bg);
   border-right: 1px solid var(--border);
   backdrop-filter: blur(22px);
@@ -631,6 +745,97 @@ button, input, select, textarea {
   margin: 0;
 }
 
+.tg-route-switch {
+  margin: 0 16px 12px;
+  padding: 6px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  flex-shrink: 0;
+  box-shadow: var(--surface-shadow);
+}
+.tg-panel--collapsed .tg-route-switch {
+  margin: 0 12px 12px;
+  grid-template-columns: 1fr;
+  padding: 5px;
+}
+.tg-route-tab {
+  min-height: 42px;
+  padding: 10px 12px;
+  border-radius: 11px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-2);
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.2s ease, border-color 0.2s ease, background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+}
+.tg-route-tab:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-hi);
+  color: var(--text-1);
+  background: var(--card-hov);
+}
+.tg-route-tab:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.tg-route-tab--active {
+  border-color: color-mix(in srgb, var(--accent) 58%, var(--border-hi));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 16%, rgba(255,255,255,0.18)), transparent 68%),
+    color-mix(in srgb, var(--accent) 12%, var(--card));
+  color: var(--text-1);
+  box-shadow: 0 12px 24px rgba(59,130,246,0.12);
+}
+.tgd .tg-route-tab--active {
+  box-shadow: 0 14px 28px rgba(34,211,238,0.14);
+}
+.tg-route-tab-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 800;
+  flex-shrink: 0;
+}
+.tg-route-tab-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  text-align: left;
+}
+.tg-route-tab-title {
+  color: inherit;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.tg-route-tab-note {
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.tg-panel--collapsed .tg-route-tab {
+  padding: 10px 8px;
+}
+.tg-panel--collapsed .tg-route-tab-copy {
+  display: none;
+}
+
 .tg-welcome-banner-shell {
   position: fixed;
   top: 18px;
@@ -892,6 +1097,7 @@ button, input, select, textarea {
   flex: 1; overflow-y: auto; overflow-x: hidden;
   padding: 14px 14px 24px;
   display: flex; flex-direction: column; gap: 12px;
+  overscroll-behavior: contain;
   scrollbar-gutter: stable;
   position: relative;
   z-index: 1;
@@ -1184,9 +1390,13 @@ button, input, select, textarea {
 .tg-status-complete { color: var(--status-complete); }
 .tg-status-pending  { color: var(--status-pending); }
 .tg-status-blocked  { color: var(--status-blocked); }
+.tg-status-unlinked { color: var(--text-3); }
+.tg-status-cycle    { color: var(--status-cycle); }
 .tg-status-complete .tg-dot { background: var(--status-complete); }
 .tg-status-pending .tg-dot  { background: var(--status-pending); }
 .tg-status-blocked .tg-dot  { background: var(--status-blocked); }
+.tg-status-unlinked .tg-dot { background: var(--text-3); }
+.tg-status-cycle .tg-dot    { background: var(--status-cycle); }
 
 /* ── Graph legend ── */
 .tg-graph-legend {
@@ -1277,6 +1487,86 @@ button, input, select, textarea {
 .tgl .tg-input:focus, .tgl .tg-select:focus {
   box-shadow: 0 0 0 3px rgba(124,58,237,0.1);
   background: rgba(124,58,237,0.03);
+}
+.tg-search-input-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(92px, auto);
+  gap: 10px;
+  align-items: center;
+}
+.tg-board-create-row {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+.tg-board-create-row .tg-btn {
+  width: auto;
+  min-width: 136px;
+}
+.tg-search-reset {
+  min-height: 40px;
+  min-width: 92px;
+  width: 100%;
+  padding: 0 13px;
+  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 14%, rgba(255,255,255,0.16)), transparent 68%),
+    color-mix(in srgb, var(--card) 90%, transparent);
+  color: var(--text-1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: stretch;
+  justify-self: stretch;
+  font-family: 'Open Sans', sans-serif;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  box-shadow: var(--surface-shadow);
+  backdrop-filter: blur(14px) saturate(1.04);
+  appearance: none;
+  -webkit-appearance: none;
+  transition: transform 0.2s ease, border-color 0.2s ease, background 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+  white-space: nowrap;
+}
+.tg-search-reset::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,0.22), transparent 54%);
+  opacity: 0.92;
+  pointer-events: none;
+}
+.tg-search-reset:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border-hi));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 18%, rgba(255,255,255,0.18)), transparent 68%),
+    color-mix(in srgb, var(--card-hov) 92%, transparent);
+  box-shadow: var(--surface-shadow-hi);
+}
+.tg-search-reset:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.tg-search-reset:disabled {
+  border-color: color-mix(in srgb, var(--border) 82%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.1), transparent 68%),
+    color-mix(in srgb, var(--card) 96%, transparent);
+  color: var(--text-3);
+  opacity: 1;
+  cursor: not-allowed;
+  box-shadow: none;
 }
 .tg-search-meta {
   margin-top: 10px;
@@ -1408,8 +1698,8 @@ button, input, select, textarea {
 
 /* ── Buttons ── */
 .tg-btn {
-  width: 100%; min-height: 40px; padding: 11px 14px;
-  border: none; border-radius: 10px;
+  width: 100%; min-height: 42px; padding: 11px 14px;
+  border: 1px solid transparent; border-radius: 12px;
   font-family: 'Open Sans', sans-serif;
   font-size: 13px; font-weight: 800;
   cursor: pointer; letter-spacing: -0.1px;
@@ -1418,10 +1708,11 @@ button, input, select, textarea {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   line-height: 1.1;
   box-shadow: 0 10px 22px rgba(15,23,42,0.08);
+  backdrop-filter: blur(14px) saturate(1.08);
 }
 .tg-btn::after {
   content:''; position: absolute; inset: 0;
-  background: linear-gradient(rgba(255,255,255,0.1), transparent);
+  background: linear-gradient(180deg, rgba(255,255,255,0.18), transparent 58%);
   opacity: 0; transition: opacity 0.2s;
 }
 .tg-btn:hover:not(:disabled)::after { opacity: 1; }
@@ -1438,7 +1729,9 @@ button, input, select, textarea {
 }
 .tg-btn-primary:hover:not(:disabled) { box-shadow: 0 16px 34px rgba(96,165,250,0.34); }
 .tg-btn-secondary {
-  background: var(--card);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.16), transparent 64%),
+    color-mix(in srgb, var(--card) 92%, transparent);
   color: var(--text-1);
   border: 1px solid var(--border);
   box-shadow: var(--surface-shadow);
@@ -1501,6 +1794,1182 @@ button, input, select, textarea {
   border-color: rgba(124,58,237,0.1);
 }
 .tg-hints b { color: var(--accent); font-weight: 700; }
+
+.tg-cycle-banner {
+  padding: 16px 18px;
+  border-radius: 22px;
+  border: 1px solid color-mix(in srgb, var(--status-cycle) 30%, var(--border));
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--status-cycle) 12%, rgba(255,255,255,0.08)), transparent 72%),
+    color-mix(in srgb, var(--panel-bg) 94%, transparent);
+  box-shadow: var(--surface-shadow-hi);
+  position: relative;
+  overflow: hidden;
+}
+.tg-cycle-banner::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(120deg, rgba(255,255,255,0.14), transparent 34%, transparent 68%, rgba(255,255,255,0.06)),
+    radial-gradient(circle at top right, color-mix(in srgb, var(--status-cycle) 18%, transparent), transparent 38%);
+  pointer-events: none;
+}
+.tg-cycle-banner > * {
+  position: relative;
+  z-index: 1;
+}
+.tg-cycle-banner-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.tg-cycle-banner-copy-wrap {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+.tg-cycle-banner-kicker {
+  color: var(--status-cycle);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.tg-cycle-banner-title {
+  color: var(--text-1);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.tg-cycle-banner-copy {
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  max-width: 680px;
+}
+.tg-cycle-banner-btn {
+  width: auto;
+  min-width: 190px;
+  flex: 0 0 auto;
+}
+.tg-cycle-banner-groups {
+  margin-top: 14px;
+  display: grid;
+  gap: 8px;
+}
+.tg-cycle-banner-group {
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--status-cycle) 18%, var(--border));
+  background: color-mix(in srgb, var(--status-cycle-bg) 52%, transparent);
+  display: grid;
+  gap: 3px;
+}
+.tg-cycle-banner-group-label {
+  color: var(--status-cycle);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.tg-cycle-banner-group-text {
+  color: var(--text-1);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+
+.tg-admin-page {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 20px;
+}
+.tg-admin-shell {
+  width: min(100%, 1320px);
+  min-width: 0;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.tg-admin-head {
+  position: relative;
+  overflow: hidden;
+  border-radius: 24px;
+  border: 1px solid var(--border);
+  background:
+    radial-gradient(circle at top right, color-mix(in srgb, var(--accent) 16%, transparent), transparent 28%),
+    linear-gradient(180deg, color-mix(in srgb, var(--panel-bg) 92%, white 8%), var(--panel-bg));
+  padding: 24px;
+  box-shadow: var(--surface-shadow-hi);
+}
+.tg-admin-head::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(120deg, rgba(255,255,255,0.08), transparent 34%, transparent 72%, rgba(255,255,255,0.04));
+  pointer-events: none;
+}
+.tg-admin-head > * {
+  position: relative;
+  z-index: 1;
+}
+.tg-admin-kicker {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.tg-admin-title {
+  margin-top: 10px;
+  font-size: clamp(26px, 2vw, 34px);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+.tg-admin-copy {
+  margin-top: 8px;
+  max-width: 720px;
+  color: var(--text-2);
+  font-size: 14px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.tg-admin-meta {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+}
+.tg-admin-stat {
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card) 78%, transparent);
+  padding: 14px 16px;
+  box-shadow: var(--surface-shadow);
+}
+.tg-admin-stat-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.tg-admin-stat-value {
+  display: block;
+  margin-top: 6px;
+  font-size: 23px;
+  font-weight: 800;
+  color: var(--text-1);
+}
+.tg-admin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+.tg-admin-card {
+  border-radius: 22px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.07), transparent 58%),
+    var(--panel-bg);
+  padding: 18px;
+  box-shadow: var(--surface-shadow);
+}
+.tg-admin-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.tg-admin-card-title {
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+.tg-admin-card-copy {
+  margin-top: 6px;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.tg-admin-card-note {
+  margin-top: 10px;
+  color: var(--text-3);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.tg-admin-head-tags {
+  margin-top: 14px;
+}
+.tg-admin-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tg-admin-action-row .tg-inline-btn {
+  flex: 1 1 140px;
+}
+.tg-admin-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.tg-admin-issue-copy {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.tg-admin-issue-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.tg-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+.tg-detail-card {
+  border-radius: 22px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.09), transparent 60%),
+    color-mix(in srgb, var(--panel-bg) 95%, transparent);
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+  box-shadow: var(--surface-shadow);
+}
+.tg-detail-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.tg-detail-card-title {
+  color: var(--text-1);
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.tg-detail-card-badge {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--text-1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.tg-detail-hero {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+.tg-detail-hero-value {
+  color: var(--text-1);
+  font-size: clamp(30px, 3vw, 42px);
+  font-weight: 800;
+  line-height: 0.95;
+  letter-spacing: -0.05em;
+}
+.tg-detail-hero-label {
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  padding-bottom: 4px;
+}
+.tg-detail-progress-track {
+  height: 12px;
+  border-radius: 999px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--border) 92%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.12), transparent 60%),
+    color-mix(in srgb, var(--card) 94%, transparent);
+}
+.tg-detail-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #10b981 0%, #38bdf8 52%, #7c3aed 100%);
+}
+.tg-detail-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.tg-detail-mini {
+  padding: 10px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, currentColor 20%, var(--border));
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.14), transparent 62%),
+    color-mix(in srgb, currentColor 7%, var(--card));
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+.tg-detail-mini-value {
+  color: var(--text-1);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.03em;
+}
+.tg-detail-mini-label {
+  color: var(--text-3);
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.tg-detail-mini-bar {
+  height: 5px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+.tg-detail-mini-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: currentColor;
+}
+.tg-detail-mini--complete {
+  color: var(--status-complete);
+}
+.tg-detail-mini--ready {
+  color: var(--status-pending);
+}
+.tg-detail-mini--blocked {
+  color: var(--status-blocked);
+}
+.tg-detail-mini--links {
+  color: var(--accent);
+}
+.tg-detail-mini--muted {
+  color: var(--text-3);
+}
+.tg-detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.tg-detail-tag {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card) 90%, transparent);
+  color: var(--text-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.tg-detail-tag--good {
+  border-color: color-mix(in srgb, var(--status-complete) 24%, var(--border));
+  background: color-mix(in srgb, var(--status-complete) 10%, var(--card));
+  color: var(--status-complete);
+}
+.tg-detail-tag--warn {
+  border-color: color-mix(in srgb, var(--status-cycle) 24%, var(--border));
+  background: color-mix(in srgb, var(--status-cycle) 10%, var(--card));
+  color: var(--status-cycle);
+}
+.tg-admin-issue-list {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.tg-admin-issue-item {
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  padding: 12px 14px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.tg-admin-issue-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-1);
+  overflow-wrap: anywhere;
+}
+.tg-admin-issue-meta {
+  margin-top: 4px;
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.tg-admin-issue-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tg-admin-empty {
+  margin-top: 14px;
+  border-radius: 16px;
+  border: 1px dashed var(--border);
+  padding: 18px 16px;
+  color: var(--text-2);
+  background: color-mix(in srgb, var(--card) 78%, transparent);
+}
+.tg-admin-graph-shell {
+  width: 100%;
+  min-height: clamp(420px, 62dvh, 640px);
+  display: flex;
+}
+.tg-admin-graph-shell > .tg-graph {
+  flex: 1 1 auto;
+  min-height: clamp(420px, 62dvh, 640px);
+  border-radius: 24px;
+  border: 1px solid var(--border);
+  box-shadow: var(--surface-shadow-hi);
+}
+
+.tg-task-page {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  position: relative;
+  z-index: 1;
+  background:
+    radial-gradient(circle at 12% 14%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 24%),
+    radial-gradient(circle at 84% 18%, color-mix(in srgb, var(--status-cycle) 12%, transparent), transparent 22%),
+    linear-gradient(180deg, color-mix(in srgb, var(--graph-bg) 90%, white 10%), var(--graph-bg));
+}
+.tg-task-page-shell {
+  width: min(100%, 1240px);
+  min-width: 0;
+  display: grid;
+  gap: 16px;
+}
+.tg-task-page-head {
+  padding: 16px 18px;
+  border-radius: 22px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 12%, rgba(255,255,255,0.08)), transparent 72%),
+    color-mix(in srgb, var(--panel-bg) 95%, transparent);
+  box-shadow: var(--surface-shadow-hi);
+  position: relative;
+  overflow: hidden;
+}
+.tg-task-page-head::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(120deg, rgba(255,255,255,0.14), transparent 30%, transparent 74%, rgba(255,255,255,0.06)),
+    radial-gradient(circle at top right, rgba(255,255,255,0.12), transparent 32%);
+  pointer-events: none;
+}
+.tg-task-page-head > * {
+  position: relative;
+  z-index: 1;
+}
+.tg-task-page-kicker {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.tg-task-page-title {
+  margin-top: 6px;
+  color: var(--text-1);
+  font-size: clamp(22px, 1.9vw, 30px);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.04em;
+  overflow-wrap: anywhere;
+}
+.tg-task-page-copy {
+  margin-top: 8px;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  max-width: 680px;
+  overflow-wrap: anywhere;
+}
+.tg-task-page-head-meta {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.tg-task-page-head-stat {
+  min-height: 72px;
+  padding: 12px 13px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--border) 92%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.09), transparent 68%),
+    color-mix(in srgb, var(--card) 92%, transparent);
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  box-shadow: var(--surface-shadow);
+}
+.tg-task-page-head-stat-label {
+  color: var(--text-3);
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.tg-task-page-head-stat-value {
+  color: var(--text-1);
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+.tg-task-page-head-stat-value--small {
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.tg-task-overview {
+  padding: 14px;
+  border-radius: 22px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.16), transparent 52%),
+    color-mix(in srgb, var(--panel-bg) 95%, transparent);
+  box-shadow: var(--surface-shadow-hi);
+  position: relative;
+  overflow: hidden;
+}
+.tg-task-overview::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at top right, color-mix(in srgb, var(--accent) 12%, transparent), transparent 32%),
+    linear-gradient(120deg, rgba(255,255,255,0.14), transparent 28%, transparent 74%, rgba(255,255,255,0.06));
+  pointer-events: none;
+}
+.tg-task-overview-shell {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: stretch;
+  min-width: 0;
+}
+.tg-task-overview-side {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+.tg-task-overview-side-card {
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--border) 92%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.11), transparent 72%),
+    color-mix(in srgb, var(--card) 90%, transparent);
+  box-shadow: var(--surface-shadow);
+}
+.tg-task-overview-intro-card {
+  padding: 14px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent) 12%, rgba(255,255,255,0.06)), transparent 78%),
+    color-mix(in srgb, var(--card) 92%, transparent);
+}
+.tg-task-overview-head {
+  display: grid;
+  gap: 10px;
+}
+.tg-task-overview-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+}
+.tg-task-overview-copy-block {
+  min-width: 0;
+  flex: 1 1 190px;
+}
+.tg-task-overview-kicker {
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.tg-task-overview-title {
+  margin-top: 2px;
+  color: var(--text-1);
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: -0.03em;
+}
+.tg-task-overview-copy {
+  margin-top: 4px;
+  color: var(--text-2);
+  max-width: 36ch;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+.tg-task-overview-action {
+  flex: 0 0 auto;
+  min-width: 138px;
+  white-space: nowrap;
+}
+.tg-task-overview-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.tg-task-overview-stat {
+  min-height: 66px;
+  padding: 12px 11px 10px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--border) 92%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.08), transparent 66%),
+    color-mix(in srgb, var(--card) 90%, transparent);
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  box-shadow: var(--surface-shadow);
+}
+.tg-task-overview-stat-label {
+  color: var(--text-3);
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.tg-task-overview-stat strong {
+  color: var(--text-1);
+  font-size: 17px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.tg-task-overview-note-label {
+  color: var(--text-3);
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+.tg-task-overview-note {
+  color: var(--text-2);
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+.tg-task-overview-note-card {
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--border));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 10%, rgba(255,255,255,0.06)), transparent 78%),
+    color-mix(in srgb, var(--card) 92%, transparent);
+}
+.tg-task-overview-legend-head {
+  display: grid;
+  gap: 3px;
+  margin-bottom: 9px;
+}
+.tg-task-overview-legend-title {
+  color: var(--text-1);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.tg-task-overview-legend-copy {
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+.tg-task-overview-canvas-card {
+  min-width: 0;
+  width: 100%;
+  max-width: 760px;
+  justify-self: end;
+  padding: 12px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.14), transparent 52%),
+    color-mix(in srgb, var(--card) 88%, transparent);
+  display: grid;
+  gap: 12px;
+  box-shadow: var(--surface-shadow);
+}
+.tg-task-overview-canvas-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.tg-task-overview-canvas-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+.tg-task-overview-canvas-title {
+  color: var(--text-1);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.tg-task-overview-canvas-subtitle {
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+.tg-task-overview-canvas-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--text-1);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.tg-task-overview-flow-shell {
+  height: clamp(186px, 24vh, 228px);
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 18% 18%, rgba(255,255,255,0.1), transparent 28%),
+    linear-gradient(180deg, color-mix(in srgb, var(--graph-bg) 88%, white 12%), var(--graph-bg));
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+.tg-task-overview-svg {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  display: block;
+}
+.tg-task-overview-grid {
+  opacity: 0.9;
+}
+.tg-task-overview-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  padding: 28px;
+}
+.tg-task-overview-legend {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.tg-task-overview-legend-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 9px 10px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, currentColor 24%, var(--border));
+  background: color-mix(in srgb, currentColor 10%, var(--card));
+  color: var(--text-2);
+  font-size: 10px;
+  font-weight: 700;
+}
+.tg-task-overview-legend-label {
+  color: var(--text-1);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+.tg-task-overview-legend-item strong {
+  min-width: 24px;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  color: currentColor;
+  font-size: 10px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.tg-task-overview-canvas-note {
+  color: var(--text-3);
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+.tg-task-list-section {
+  padding: 16px;
+  border-radius: 22px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.12), transparent 52%),
+    color-mix(in srgb, var(--panel-bg) 95%, transparent);
+  box-shadow: var(--surface-shadow-hi);
+  display: grid;
+  gap: 14px;
+}
+.tg-task-list-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.tg-task-list-head-copy {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+.tg-task-list-kicker {
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+.tg-task-list-title {
+  color: var(--text-1);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+.tg-task-list-copy {
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  max-width: 56ch;
+}
+.tg-task-list-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tg-task-list-pill {
+  min-height: 28px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card) 88%, transparent);
+  color: var(--text-1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+.tg-task-list {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+}
+.tg-task-card {
+  padding: 16px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.14), transparent 52%),
+    color-mix(in srgb, var(--card) 84%, transparent);
+  box-shadow: var(--surface-shadow-hi);
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+.tg-task-card--cycle {
+  border-color: color-mix(in srgb, var(--status-cycle) 28%, var(--border));
+  box-shadow:
+    var(--surface-shadow-hi),
+    0 0 0 1px color-mix(in srgb, var(--status-cycle) 10%, transparent);
+}
+.tg-task-card-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: start;
+}
+.tg-task-card-copy {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.tg-task-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tg-task-card-title {
+  color: var(--text-1);
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+.tg-task-loop-pill {
+  min-height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--status-cycle) 24%, transparent);
+  background: color-mix(in srgb, var(--status-cycle-bg) 72%, transparent);
+  color: var(--status-cycle);
+  display: inline-flex;
+  align-items: center;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.tg-task-card-badges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.tg-task-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-weight: 700;
+  min-width: 0;
+}
+.tg-task-card-meta-sep {
+  color: color-mix(in srgb, var(--text-3) 70%, transparent);
+}
+.tg-task-badge {
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.tg-task-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.tg-inline-btn {
+  min-height: 36px;
+  min-width: 110px;
+  padding: 0 13px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, rgba(255,255,255,0.08) 24%, var(--border));
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.16), transparent 60%),
+    color-mix(in srgb, var(--card) 90%, transparent);
+  color: var(--text-1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  box-shadow: var(--surface-shadow);
+  backdrop-filter: blur(14px) saturate(1.04);
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, color 0.18s ease, box-shadow 0.18s ease;
+  white-space: nowrap;
+}
+.tg-inline-btn::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(255,255,255,0.2), transparent 56%);
+  opacity: 0.94;
+  pointer-events: none;
+}
+.tg-inline-btn:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-hi);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.22), transparent 60%),
+    color-mix(in srgb, var(--card-hov) 92%, transparent);
+  box-shadow: var(--surface-shadow-hi);
+}
+.tg-inline-btn--ghost {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 16%, rgba(255,255,255,0.18)), transparent 62%),
+    color-mix(in srgb, var(--accent) 10%, var(--card));
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+}
+.tg-inline-btn--ghost:hover {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 22%, rgba(255,255,255,0.2)), transparent 62%),
+    color-mix(in srgb, var(--accent) 14%, var(--card-hov));
+}
+.tg-inline-btn:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.tg-inline-btn--danger {
+  color: #f87171;
+  border-color: rgba(239,68,68,0.26);
+  background:
+    linear-gradient(180deg, rgba(254,202,202,0.16), transparent 60%),
+    rgba(239,68,68,0.08);
+}
+.tg-inline-btn--danger:hover {
+  border-color: rgba(239,68,68,0.4);
+  background:
+    linear-gradient(180deg, rgba(254,202,202,0.2), transparent 60%),
+    rgba(239,68,68,0.14);
+}
+.tg-admin-card-head .tg-inline-btn,
+.tg-admin-issue-actions .tg-inline-btn,
+.tg-task-card-actions .tg-inline-btn,
+.tg-search-input-row .tg-search-reset {
+  justify-content: center;
+}
+.tg-task-callout {
+  padding: 10px 12px;
+  border-radius: 13px;
+  border: 1px solid color-mix(in srgb, var(--status-blocked) 16%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.06), transparent 68%),
+    color-mix(in srgb, var(--status-blocked) 10%, var(--panel-bg));
+  color: var(--status-blocked);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+.tg-task-callout--cycle {
+  border-color: color-mix(in srgb, var(--status-cycle) 18%, transparent);
+  background: color-mix(in srgb, var(--status-cycle) 10%, var(--panel-bg));
+  color: var(--status-cycle);
+}
+.tg-task-card-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.tg-task-card-cell {
+  min-height: 92px;
+  padding: 12px 13px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background:
+    linear-gradient(180deg, rgba(255,255,255,0.08), transparent 70%),
+    color-mix(in srgb, var(--card) 90%, transparent);
+  display: grid;
+  align-content: flex-start;
+  gap: 6px;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+}
+.tg-task-card-label {
+  color: var(--text-3);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.tg-task-card-value {
+  color: var(--text-1);
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.tg-task-page-empty {
+  min-height: 320px;
+  border-radius: 24px;
+  border: 1px dashed var(--border-hi);
+  background: color-mix(in srgb, var(--panel-bg) 94%, transparent);
+  display: grid;
+  place-items: center;
+  text-align: center;
+  padding: 32px;
+  box-shadow: var(--surface-shadow);
+}
 
 /* ══ Graph area ══ */
 .tg-graph {
@@ -1587,6 +3056,7 @@ button, input, select, textarea {
 .tg-empty {
   position: absolute; top: 50%; left: 50%;
   transform: translate(-50%,-50%);
+  width: min(360px, calc(100% - 36px));
   text-align: center; pointer-events: none; z-index: 1;
   animation: tg-empty-in 0.6s ease both;
 }
@@ -1829,10 +3299,85 @@ button, input, select, textarea {
   box-sizing: border-box;
   padding: 14px 22px;
   isolation: isolate;
+  overflow: visible;
   transition: transform 0.22s ease, box-shadow 0.22s ease;
+}
+.tg-task-node-shell--cycle {
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 0 0 2px color-mix(in srgb, var(--status-cycle) 42%, transparent),
+    0 0 0 4px color-mix(in srgb, var(--status-cycle) 10%, transparent),
+    0 18px 34px color-mix(in srgb, var(--status-cycle) 14%, transparent);
+}
+.tg-task-node-shell--cycle::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--status-cycle) 24%, transparent);
+  background:
+    radial-gradient(circle at top right, color-mix(in srgb, var(--status-cycle) 20%, transparent), transparent 42%),
+    linear-gradient(135deg, color-mix(in srgb, var(--status-cycle) 16%, transparent), transparent 64%);
+  opacity: 0.94;
+  box-shadow: 0 20px 38px color-mix(in srgb, var(--status-cycle) 16%, transparent);
+  animation: tg-cycle-node-pulse 2.2s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 0;
+}
+.tg-task-node-shell--cycle::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--status-cycle) 34%, transparent);
+  pointer-events: none;
+  z-index: 0;
+}
+.tg-task-node-body {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  display: grid;
+  gap: 4px;
+  justify-items: center;
+}
+.tg-task-node-flag {
+  position: absolute;
+  top: -13px;
+  right: 12px;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--status-cycle) 26%, transparent);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--status-cycle) 92%, white 8%), color-mix(in srgb, var(--status-cycle) 72%, #f97316 28%));
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  box-shadow:
+    0 12px 26px rgba(15,23,42,0.16),
+    0 0 0 4px color-mix(in srgb, var(--status-cycle) 12%, transparent);
+  z-index: 2;
 }
 .tg-task-node-label {
   width: 100%;
+  position: relative;
+  z-index: 1;
+}
+.tg-task-node-meta {
+  position: relative;
+  z-index: 1;
+  color: color-mix(in srgb, var(--status-cycle) 76%, var(--text-2));
+  font-size: 9.5px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 .tg-node-tooltip {
   position: absolute;
@@ -1916,6 +3461,11 @@ button, input, select, textarea {
   font-weight: 700;
   line-height: 1.45;
   text-align: left;
+}
+.tg-node-tooltip-callout--cycle {
+  border-color: color-mix(in srgb, var(--status-cycle) 18%, transparent);
+  background: color-mix(in srgb, var(--status-cycle) 10%, var(--panel-bg));
+  color: var(--status-cycle);
 }
 .tg-node-tooltip-grid {
   display: grid;
@@ -2015,6 +3565,21 @@ button, input, select, textarea {
 .react-flow__edge.selected .tg-edge-arrow {
   filter: drop-shadow(0 10px 16px rgba(15,23,42,0.22));
 }
+.react-flow__edge.tg-dependency-edge--cycle .tg-edge-halo {
+  opacity: 1;
+  animation: tg-cycle-edge-pulse 1.65s ease-in-out infinite;
+}
+.react-flow__edge.tg-dependency-edge--cycle .tg-edge-main {
+  filter: drop-shadow(0 0 14px rgba(249,115,22,0.18)) drop-shadow(0 10px 22px rgba(124,45,18,0.14));
+}
+.react-flow__edge.tg-dependency-edge--cycle .tg-edge-flow {
+  stroke-dasharray: 14 8;
+  animation-duration: 0.92s;
+  filter: drop-shadow(0 0 10px rgba(249,115,22,0.22));
+}
+.react-flow__edge.tg-dependency-edge--cycle .tg-edge-arrow {
+  filter: drop-shadow(0 0 10px rgba(249,115,22,0.2));
+}
 .tgd .react-flow__edge .tg-edge-flow {
   filter: drop-shadow(0 0 8px rgba(125,211,252,0.22));
 }
@@ -2081,6 +3646,14 @@ button, input, select, textarea {
   0%   { background-position: 0% 50%; }
   100% { background-position: 140% 50%; }
 }
+@keyframes tg-cycle-node-pulse {
+  0%, 100% { transform: scale(0.985); opacity: 0.86; }
+  50% { transform: scale(1.015); opacity: 1; }
+}
+@keyframes tg-cycle-edge-pulse {
+  0%, 100% { opacity: 0.72; }
+  50% { opacity: 1; }
+}
 @keyframes tg-edge-stream {
   0%   { stroke-dashoffset: 44; opacity: 0.32; }
   38%  { opacity: 1; }
@@ -2093,6 +3666,40 @@ button, input, select, textarea {
 }
 
 /* ── Responsive dashboard ── */
+@media (max-width: 1180px) {
+  .tg-admin-page {
+    padding: 18px;
+  }
+  .tg-admin-head {
+    padding: 22px;
+  }
+  .tg-admin-card {
+    padding: 16px;
+  }
+  .tg-admin-graph-shell,
+  .tg-admin-graph-shell > .tg-graph {
+    min-height: 460px;
+  }
+  .tg-task-overview-shell {
+    grid-template-columns: 1fr;
+  }
+  .tg-task-overview-canvas-card {
+    max-width: none;
+    justify-self: stretch;
+  }
+  .tg-task-card-head {
+    grid-template-columns: 1fr;
+  }
+  .tg-task-card-actions {
+    justify-content: flex-start;
+  }
+  .tg-admin-card-head .tg-inline-btn,
+  .tg-admin-issue-actions .tg-inline-btn,
+  .tg-task-card-actions .tg-inline-btn {
+    min-width: 0;
+  }
+}
+
 @media (max-width: 920px) {
   .tg-shell {
     flex-direction: column;
@@ -2150,6 +3757,21 @@ button, input, select, textarea {
   .tg-user-pill {
     margin: 10px 14px;
   }
+  .tg-route-switch {
+    margin: 0 14px 10px;
+  }
+  .tg-panel--collapsed .tg-route-switch {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+  }
+  .tg-panel--collapsed .tg-route-tab {
+    min-height: 48px;
+    padding: 10px 12px;
+    justify-content: flex-start;
+  }
+  .tg-panel--collapsed .tg-route-tab-copy {
+    display: grid;
+  }
   .tg-panel--collapsed .tg-user-pill {
     margin: 10px 14px;
     padding: 10px 12px;
@@ -2187,6 +3809,100 @@ button, input, select, textarea {
   .tg-section,
   .tg-prog-card {
     padding: 12px;
+  }
+  .tg-task-page {
+    padding: 16px;
+  }
+  .tg-admin-page {
+    padding: 16px;
+  }
+  .tg-admin-shell {
+    width: 100%;
+    gap: 14px;
+  }
+  .tg-admin-head,
+  .tg-admin-card {
+    padding: 16px;
+    border-radius: 20px;
+  }
+  .tg-admin-title {
+    font-size: clamp(24px, 4.8vw, 32px);
+  }
+  .tg-admin-copy {
+    font-size: 13px;
+    line-height: 1.6;
+  }
+  .tg-admin-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .tg-admin-grid {
+    grid-template-columns: 1fr;
+  }
+  .tg-detail-grid {
+    grid-template-columns: 1fr;
+  }
+  .tg-admin-card-head,
+  .tg-admin-issue-item {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .tg-admin-issue-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+  .tg-admin-action-row {
+    width: 100%;
+  }
+  .tg-admin-graph-shell,
+  .tg-admin-graph-shell > .tg-graph {
+    min-height: 52dvh;
+    border-radius: 20px;
+  }
+  .tg-task-page-shell {
+    gap: 14px;
+  }
+  .tg-task-page-head,
+  .tg-cycle-banner {
+    padding: 16px;
+  }
+  .tg-task-page-head-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .tg-task-page-head-stat:last-child {
+    grid-column: 1 / -1;
+  }
+  .tg-task-list-section {
+    padding: 14px;
+  }
+  .tg-task-list-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .tg-task-overview-meta {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .tg-task-overview-legend {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .tg-task-overview-flow-shell {
+    height: 220px;
+  }
+  .tg-cycle-banner-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .tg-cycle-banner-btn {
+    width: 100%;
+    min-width: 0;
+  }
+  .tg-task-list-summary {
+    width: 100%;
+  }
+  .tg-task-card-grid {
+    grid-template-columns: 1fr;
+  }
+  .tg-task-card-cell {
+    min-height: 0;
   }
   .tg-layout-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2305,6 +4021,29 @@ button, input, select, textarea {
     padding: 9px 12px 16px;
     gap: 8px;
   }
+  .tg-route-switch {
+    margin: 0 12px 10px;
+    padding: 5px;
+  }
+  .tg-panel--collapsed .tg-route-switch {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .tg-route-tab {
+    padding: 9px 10px;
+    justify-content: flex-start;
+  }
+  .tg-route-tab-icon {
+    width: 22px;
+    height: 22px;
+    border-radius: 7px;
+    font-size: 12px;
+  }
+  .tg-route-tab-title {
+    font-size: 10.5px;
+  }
+  .tg-route-tab-note {
+    display: none;
+  }
   .tg-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -2318,6 +4057,27 @@ button, input, select, textarea {
   .tg-btn {
     min-height: 38px;
     font-size: 12px;
+  }
+  .tg-search-input-row {
+    grid-template-columns: 1fr;
+    gap: 8px;
+  }
+  .tg-board-create-row {
+    grid-template-columns: 1fr;
+  }
+  .tg-board-create-row .tg-btn {
+    width: 100%;
+    min-width: 0;
+  }
+  .tg-search-reset,
+  .tg-inline-btn {
+    min-height: 38px;
+    min-width: 0;
+    font-size: 10px;
+    letter-spacing: 0.05em;
+  }
+  .tg-search-reset {
+    width: 100%;
   }
   .tg-layout-grid {
     grid-template-columns: 1fr;
@@ -2342,6 +4102,147 @@ button, input, select, textarea {
   .tg-btn-row .tg-btn {
     width: 100%;
     flex-basis: auto;
+  }
+  .tg-task-page {
+    padding: 12px;
+    gap: 12px;
+  }
+  .tg-admin-page {
+    padding: 12px;
+  }
+  .tg-admin-head,
+  .tg-admin-card {
+    padding: 14px;
+    border-radius: 18px;
+  }
+  .tg-detail-card {
+    padding: 14px;
+    border-radius: 18px;
+    gap: 12px;
+  }
+  .tg-admin-title {
+    font-size: 22px;
+  }
+  .tg-admin-copy {
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  .tg-admin-stat {
+    padding: 12px 13px;
+    border-radius: 16px;
+  }
+  .tg-admin-stat-value {
+    font-size: 20px;
+  }
+  .tg-admin-card-title {
+    font-size: 16px;
+  }
+  .tg-detail-card-title {
+    font-size: 15px;
+  }
+  .tg-detail-card-badge,
+  .tg-detail-tag {
+    min-height: 26px;
+    font-size: 9px;
+  }
+  .tg-detail-hero-value {
+    font-size: 28px;
+  }
+  .tg-detail-mini-grid {
+    grid-template-columns: 1fr 1fr 1fr;
+  }
+  .tg-detail-mini {
+    padding: 9px;
+  }
+  .tg-detail-mini-value {
+    font-size: 16px;
+  }
+  .tg-admin-issue-item {
+    padding: 12px;
+    border-radius: 14px;
+  }
+  .tg-admin-action-row {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .tg-admin-graph-shell,
+  .tg-admin-graph-shell > .tg-graph {
+    min-height: 48dvh;
+    border-radius: 18px;
+  }
+  .tg-task-page-shell {
+    width: 100%;
+  }
+  .tg-task-page-head,
+  .tg-cycle-banner,
+  .tg-task-card,
+  .tg-task-overview,
+  .tg-task-list-section {
+    padding: 14px;
+    border-radius: 18px;
+  }
+  .tg-task-overview-shell {
+    gap: 12px;
+  }
+  .tg-task-overview-side-card,
+  .tg-task-overview-stat,
+  .tg-task-overview-canvas-card {
+    border-radius: 16px;
+  }
+  .tg-task-overview-title-row,
+  .tg-task-overview-canvas-head {
+    display: grid;
+    gap: 10px;
+  }
+  .tg-task-page-head-meta,
+  .tg-task-overview-meta {
+    grid-template-columns: 1fr 1fr;
+  }
+  .tg-task-overview-canvas-card {
+    padding: 12px;
+    border-radius: 18px;
+  }
+  .tg-task-overview-legend {
+    grid-template-columns: 1fr;
+  }
+  .tg-task-overview-flow-shell {
+    height: 198px;
+  }
+  .tg-task-page-title {
+    font-size: 22px;
+  }
+  .tg-task-list-title,
+  .tg-task-card-title {
+    font-size: 16px;
+  }
+  .tg-task-overview-title {
+    font-size: 15px;
+  }
+  .tg-task-list-summary,
+  .tg-task-overview-action,
+  .tg-task-overview-canvas-badge {
+    width: 100%;
+    justify-content: center;
+  }
+  .tg-task-card-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .tg-admin-issue-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .tg-inline-btn {
+    width: 100%;
+  }
+  .tg-task-overview-meta {
+    grid-template-columns: 1fr;
+  }
+  .tg-task-page-empty {
+    min-height: 240px;
+    padding: 24px;
   }
   .tg-graph {
     flex-basis: 58dvh;
@@ -2680,9 +4581,16 @@ function TaskNode({data}) {
 
   return (
     <div
-      className="tg-task-node-shell"
+      className={`tg-task-node-shell ${data.isCircular ? "tg-task-node-shell--cycle" : ""}`}
       style={data.cardStyle}
       aria-label={data.accessibleLabel}
+      onClick={event => {
+        if (event?.target?.closest?.(".react-flow__handle")) {
+          return;
+        }
+        event.stopPropagation();
+        data.onRequestToggle?.();
+      }}
       onDoubleClick={event => {
         event.preventDefault();
         event.stopPropagation();
@@ -2696,7 +4604,15 @@ function TaskNode({data}) {
         className="tg-task-handle tg-task-handle--target"
         aria-label={`Connect a prerequisite into ${data.label}`}
       />
-      <div className="tg-task-node-label">{data.label}</div>
+      {data.isCircular && (
+        <div className="tg-task-node-flag">{data.loopLabel || "Loop"}</div>
+      )}
+      <div className="tg-task-node-body">
+        <div className="tg-task-node-label">{data.label}</div>
+        {data.isCircular && (
+          <div className="tg-task-node-meta">Dependency loop</div>
+        )}
+      </div>
       <div className="tg-node-tooltip" role="tooltip" aria-hidden="true">
         <div className="tg-node-tooltip-head">
           <div className="tg-node-tooltip-title">{data.label}</div>
@@ -2704,6 +4620,11 @@ function TaskNode({data}) {
             {data.statusText}
           </div>
         </div>
+        {data.circularSummary && (
+          <div className="tg-node-tooltip-callout tg-node-tooltip-callout--cycle">
+            {data.circularSummary}
+          </div>
+        )}
         {data.blockedSummary && (
           <div className="tg-node-tooltip-callout">{data.blockedSummary}</div>
         )}
@@ -2738,7 +4659,9 @@ function buildDependencyPath({
   targetY,
   sourcePosition,
   targetPosition,
+  routeOffset = 0,
 }) {
+  const offset = Number(routeOffset) || 0;
   const horizontalFlow =
     sourcePosition === Position.Left ||
     sourcePosition === Position.Right ||
@@ -2748,6 +4671,17 @@ function buildDependencyPath({
   if (horizontalFlow) {
     const deltaY = Math.abs(targetY - sourceY);
     const midX = sourceX + (targetX - sourceX) / 2;
+    const laneY = sourceY + offset;
+
+    if (Math.abs(offset) > 0.1) {
+      return [
+        `M ${sourceX} ${sourceY}`,
+        `L ${midX} ${sourceY}`,
+        `L ${midX} ${laneY}`,
+        `L ${targetX} ${laneY}`,
+        `L ${targetX} ${targetY}`,
+      ].join(" ");
+    }
 
     if (deltaY <= 2) {
       return `M ${sourceX} ${sourceY} L ${targetX} ${targetY}`;
@@ -2763,6 +4697,17 @@ function buildDependencyPath({
 
   const midY = sourceY + (targetY - sourceY) / 2;
   const deltaX = Math.abs(targetX - sourceX);
+  const laneX = sourceX + offset;
+
+  if (Math.abs(offset) > 0.1) {
+    return [
+      `M ${sourceX} ${sourceY}`,
+      `L ${sourceX} ${midY}`,
+      `L ${laneX} ${midY}`,
+      `L ${laneX} ${targetY}`,
+      `L ${targetX} ${targetY}`,
+    ].join(" ");
+  }
 
   if (deltaX <= 2) {
     return `M ${sourceX} ${sourceY} L ${targetX} ${targetY}`;
@@ -2822,6 +4767,7 @@ function DependencyEdge({
   const arrowDepth = 11.5;
   const arrowGap = arrowDepth;
   const trimmedTarget = getTrimmedTargetPoint(targetX, targetY, targetPosition, arrowGap);
+  const routeOffset = Number(data?.routeOffset) || 0;
 
   const edgePath = buildDependencyPath({
     sourceX,
@@ -2830,6 +4776,7 @@ function DependencyEdge({
     targetY,
     sourcePosition,
     targetPosition,
+    routeOffset,
   });
   const visualPath = buildDependencyPath({
     sourceX,
@@ -2838,6 +4785,7 @@ function DependencyEdge({
     targetY: trimmedTarget.y,
     sourcePosition,
     targetPosition,
+    routeOffset,
   });
 
   const lineStroke = data?.lineStroke || style?.stroke || "rgba(71,85,105,0.48)";
@@ -3164,6 +5112,1483 @@ function WelcomeBanner({banner}) {
   );
 }
 
+function getTaskStatusLabel(status) {
+  switch (status) {
+    case "complete":
+      return "Completed";
+    case "blocked":
+      return "Blocked";
+    case "unlinked":
+      return "Needs dependency";
+    case "ready":
+      return "Ready";
+    default:
+      return "Unknown";
+  }
+}
+
+function getTaskStatusClassName(status) {
+  switch (status) {
+    case "complete":
+      return "tg-status-complete";
+    case "blocked":
+      return "tg-status-blocked";
+    case "unlinked":
+      return "tg-status-unlinked";
+    case "ready":
+    default:
+      return "tg-status-pending";
+  }
+}
+
+function formatTaskNames(items, emptyText) {
+  if (!items?.length) {
+    return emptyText;
+  }
+
+  return items.map((item) => item.data.label).join(", ");
+}
+
+function formatCompactTaskNames(items, emptyText, limit = 2) {
+  if (!items?.length) {
+    return emptyText;
+  }
+
+  const labels = items.map((item) => item.data.label);
+  if (labels.length <= limit) {
+    return labels.join(", ");
+  }
+
+  return `${labels.slice(0, limit).join(", ")} +${labels.length - limit}`;
+}
+
+function getTaskRecommendedAction(record) {
+  if (record.isCircular) {
+    return "Break one loop link";
+  }
+
+  if (record.status === "blocked") {
+    return "Finish blockers first";
+  }
+
+  if (record.status === "complete") {
+    return record.children.length ? "Done, unblocks next tasks" : "Done";
+  }
+
+  if (record.status === "unlinked") {
+    return "Add a link";
+  }
+
+  if (!record.parents.length && !record.children.length) {
+    return "Standalone";
+  }
+
+  return "Ready to work";
+}
+
+function CircularDependencyBanner({groups, onReview}) {
+  if (!groups.length) return null;
+
+  return (
+    <div className="tg-cycle-banner" role="status" aria-live="polite">
+      <div className="tg-cycle-banner-head">
+        <div className="tg-cycle-banner-copy-wrap">
+          <div className="tg-cycle-banner-kicker">Dependency Health</div>
+          <div className="tg-cycle-banner-title">Circular dependencies detected</div>
+          <div className="tg-cycle-banner-copy">
+            Remove one dependency link in each loop to restore a clean task flow.
+          </div>
+        </div>
+        <button
+          type="button"
+          className="tg-btn tg-btn-secondary tg-cycle-banner-btn"
+          onClick={onReview}
+        >
+          Show Circular Tasks
+        </button>
+      </div>
+      <div className="tg-cycle-banner-groups">
+        {groups.map((group) => (
+          <div key={group.label} className="tg-cycle-banner-group">
+            <span className="tg-cycle-banner-group-label">{group.label}</span>
+            <span className="tg-cycle-banner-group-text">{group.summary}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function getOverviewNodeVisual(status, isCircular, dark) {
+  if (status === "complete") {
+    return {
+      fill: dark ? "rgba(16,185,129,0.16)" : "rgba(209,250,229,0.96)",
+      stroke: dark ? "#34d399" : "#059669",
+      text: dark ? "#d1fae5" : "#065f46",
+      statusFill: dark ? "rgba(16,185,129,0.18)" : "rgba(16,185,129,0.12)",
+    };
+  }
+
+  if (status === "blocked") {
+    return {
+      fill: dark ? "rgba(239,68,68,0.14)" : "rgba(254,226,226,0.98)",
+      stroke: dark ? "#f87171" : "#dc2626",
+      text: dark ? "#fee2e2" : "#991b1b",
+      statusFill: dark ? "rgba(239,68,68,0.16)" : "rgba(239,68,68,0.1)",
+    };
+  }
+
+  if (isCircular) {
+    return {
+      fill: dark ? "rgba(249,115,22,0.16)" : "rgba(255,237,213,0.98)",
+      stroke: dark ? "#fb923c" : "#ea580c",
+      text: dark ? "#ffedd5" : "#9a3412",
+      statusFill: dark ? "rgba(249,115,22,0.16)" : "rgba(249,115,22,0.1)",
+    };
+  }
+
+  return {
+    fill: dark ? "rgba(245,158,11,0.12)" : "rgba(254,243,199,0.98)",
+    stroke: dark ? "#fbbf24" : "#d97706",
+    text: dark ? "#fef3c7" : "#92400e",
+    statusFill: dark ? "rgba(245,158,11,0.14)" : "rgba(245,158,11,0.1)",
+  };
+}
+
+function getOverviewStatusChipLabel(statusText = "", status = "") {
+  if (status === "unlinked") return "NEEDS LINK";
+  if (status === "complete") return "DONE";
+  return String(statusText || status || "READY").toUpperCase();
+}
+
+function getHandlePoint(node, handleType = "source", nodeWidth = NW, nodeHeight = NH) {
+  const handlePosition = handleType === "source"
+    ? (node.sourcePosition || Position.Bottom)
+    : (node.targetPosition || Position.Top);
+  const baseX = node.position?.x ?? 0;
+  const baseY = node.position?.y ?? 0;
+
+  switch (handlePosition) {
+    case Position.Top:
+      return { x: baseX + nodeWidth / 2, y: baseY, position: handlePosition };
+    case Position.Bottom:
+      return { x: baseX + nodeWidth / 2, y: baseY + nodeHeight, position: handlePosition };
+    case Position.Left:
+      return { x: baseX, y: baseY + nodeHeight / 2, position: handlePosition };
+    case Position.Right:
+      return { x: baseX + nodeWidth, y: baseY + nodeHeight / 2, position: handlePosition };
+    default:
+      return { x: baseX + nodeWidth / 2, y: baseY + nodeHeight, position: handlePosition };
+  }
+}
+
+function TaskOverviewMap({nodes, edges, dark}) {
+  if (!nodes.length) return null;
+
+  const overviewScale = 0.54;
+  const nodeWidth = 144;
+  const nodeHeight = 46;
+  const padding = 26;
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const scaledNodeFrame = nodes.map((node) => ({
+    id: node.id,
+    x: (node.position?.x ?? 0) * overviewScale,
+    y: (node.position?.y ?? 0) * overviewScale,
+  }));
+  const minX = Math.min(...scaledNodeFrame.map((node) => node.x));
+  const minY = Math.min(...scaledNodeFrame.map((node) => node.y));
+  const maxX = Math.max(...scaledNodeFrame.map((node) => node.x + nodeWidth));
+  const maxY = Math.max(...scaledNodeFrame.map((node) => node.y + nodeHeight));
+  const viewBoxWidth = Math.max(320, maxX - minX + padding * 2);
+  const viewBoxHeight = Math.max(170, maxY - minY + padding * 2);
+  const offsetX = padding - minX;
+  const offsetY = padding - minY;
+
+  return (
+    <svg
+      className="tg-task-overview-svg"
+      width={viewBoxWidth}
+      height={viewBoxHeight}
+      viewBox={`0 0 ${viewBoxWidth} ${viewBoxHeight}`}
+      preserveAspectRatio="xMidYMid meet"
+      role="img"
+      aria-label="Overall task dependency chart"
+    >
+      <defs>
+        <pattern
+          id="tg-overview-grid-pattern"
+          width="42"
+          height="42"
+          patternUnits="userSpaceOnUse"
+        >
+          <path
+            d="M 42 0 L 0 0 0 42"
+            fill="none"
+            stroke={dark ? "rgba(125,211,252,0.08)" : "rgba(148,163,184,0.16)"}
+            strokeWidth="1"
+          />
+        </pattern>
+        <filter id="tg-overview-shadow" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow
+            dx="0"
+            dy="10"
+            stdDeviation="10"
+            floodColor={dark ? "rgba(15,23,42,0.36)" : "rgba(15,23,42,0.12)"}
+          />
+        </filter>
+        <filter id="tg-overview-glow" x="-30%" y="-30%" width="160%" height="160%">
+          <feDropShadow
+            dx="0"
+            dy="0"
+            stdDeviation="9"
+            floodColor={dark ? "rgba(251,146,60,0.24)" : "rgba(249,115,22,0.18)"}
+          />
+        </filter>
+      </defs>
+
+      <rect
+        className="tg-task-overview-grid"
+        width={viewBoxWidth}
+        height={viewBoxHeight}
+        fill="url(#tg-overview-grid-pattern)"
+      />
+
+      {edges.map((edge) => {
+        const sourceNode = nodeById.get(edge.source);
+        const targetNode = nodeById.get(edge.target);
+        if (!sourceNode || !targetNode) return null;
+
+        const sourceHandle = getHandlePoint(
+          {
+            ...sourceNode,
+            position: {
+              x: (sourceNode.position?.x ?? 0) * overviewScale,
+              y: (sourceNode.position?.y ?? 0) * overviewScale,
+            },
+          },
+          "source",
+          nodeWidth,
+          nodeHeight
+        );
+        const targetHandle = getHandlePoint(
+          {
+            ...targetNode,
+            position: {
+              x: (targetNode.position?.x ?? 0) * overviewScale,
+              y: (targetNode.position?.y ?? 0) * overviewScale,
+            },
+          },
+          "target",
+          nodeWidth,
+          nodeHeight
+        );
+        const translatedSource = {
+          x: sourceHandle.x + offsetX,
+          y: sourceHandle.y + offsetY,
+        };
+        const translatedTarget = {
+          x: targetHandle.x + offsetX,
+          y: targetHandle.y + offsetY,
+        };
+        const trimmedTarget = getTrimmedTargetPoint(
+          translatedTarget.x,
+          translatedTarget.y,
+          targetHandle.position
+        );
+        const routeOffset = Number(edge?.data?.routeOffset) || 0;
+        const path = buildDependencyPath({
+          sourceX: translatedSource.x,
+          sourceY: translatedSource.y,
+          targetX: trimmedTarget.x,
+          targetY: trimmedTarget.y,
+          sourcePosition: sourceHandle.position,
+          targetPosition: targetHandle.position,
+          routeOffset,
+        });
+        const arrowPoints = buildArrowPoints(
+          translatedTarget.x,
+          translatedTarget.y,
+          targetHandle.position
+        );
+        const stroke = edge?.style?.stroke || (dark ? "rgba(125,211,252,0.56)" : "rgba(71,85,105,0.46)");
+        const strokeWidth = Number(edge?.style?.strokeWidth) || 2.6;
+        const isCircularEdge = String(edge.className || "").includes("cycle");
+
+        return (
+          <g key={edge.id || `${edge.source}-${edge.target}`}>
+            <path
+              d={path}
+              fill="none"
+              stroke={isCircularEdge ? (dark ? "rgba(249,115,22,0.18)" : "rgba(249,115,22,0.12)") : (dark ? "rgba(34,211,238,0.12)" : "rgba(99,102,241,0.08)")}
+              strokeWidth={strokeWidth + 6}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <path
+              d={path}
+              fill="none"
+              stroke={stroke}
+              strokeWidth={strokeWidth}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeDasharray={isCircularEdge ? "12 10" : "10 12"}
+            />
+            <polygon points={arrowPoints} fill={stroke} />
+          </g>
+        );
+      })}
+
+      {nodes.map((node) => {
+        const { status = "ready", isCircular = false, statusText = "Ready", label = "" } = node.data || {};
+        const visual = getOverviewNodeVisual(status, isCircular, dark);
+        const x = (node.position?.x ?? 0) * overviewScale + offsetX;
+        const y = (node.position?.y ?? 0) * overviewScale + offsetY;
+
+        return (
+          <g
+            key={node.id}
+            transform={`translate(${x}, ${y})`}
+            filter={isCircular ? "url(#tg-overview-glow)" : "url(#tg-overview-shadow)"}
+          >
+            {isCircular && (
+              <rect
+                x="-5"
+                y="-5"
+                width={nodeWidth + 10}
+                height={nodeHeight + 10}
+                rx="16"
+                fill="none"
+                stroke={dark ? "rgba(251,146,60,0.34)" : "rgba(249,115,22,0.24)"}
+                strokeWidth="2.2"
+              />
+            )}
+            <rect
+              width={nodeWidth}
+              height={nodeHeight}
+              rx="14"
+              fill={visual.fill}
+              stroke={visual.stroke}
+              strokeWidth="2"
+            />
+            <text
+              x={nodeWidth / 2}
+              y={nodeHeight / 2 - 1}
+              textAnchor="middle"
+              fontFamily="'Open Sans', sans-serif"
+              fontSize="9.8"
+              fontWeight="800"
+              fill={visual.text}
+            >
+              {label}
+            </text>
+            <g transform={`translate(${nodeWidth / 2 - 30}, ${nodeHeight - 18})`}>
+              <rect
+                width="60"
+                height="12"
+                rx="999"
+                fill={visual.statusFill}
+                stroke="rgba(255,255,255,0.12)"
+              />
+              <text
+                x="30"
+                y="8.8"
+                textAnchor="middle"
+                fontFamily="'Open Sans', sans-serif"
+                fontSize="6.1"
+                fontWeight="800"
+                letterSpacing="0.8"
+                fill={visual.text}
+              >
+                {getOverviewStatusChipLabel(statusText, status)}
+              </text>
+            </g>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function TaskOverviewPanel({
+  total,
+  visibleCount,
+  hasActiveTaskFilters,
+  activeTaskFilterLabel,
+  statusLegend,
+  overviewNodes,
+  overviewEdges,
+  layoutLabel,
+  dark,
+  onOpenGraph,
+}) {
+  const hasOverview = overviewNodes.length > 0;
+
+  return (
+    <section className="tg-task-overview">
+      <div className="tg-task-overview-shell">
+        <div className="tg-task-overview-side">
+          <div className="tg-task-overview-side-card tg-task-overview-intro-card">
+            <div className="tg-task-overview-head">
+              <div className="tg-task-overview-kicker">Board Snapshot</div>
+              <div className="tg-task-overview-title-row">
+                <div className="tg-task-overview-copy-block">
+                  <div className="tg-task-overview-title">Dependency overview</div>
+                  <div className="tg-task-overview-copy">
+                    A compact map of the full workflow while you review individual tasks below.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="tg-inline-btn tg-inline-btn--ghost tg-task-overview-action"
+                  onClick={onOpenGraph}
+                >
+                  Open Full Graph
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="tg-task-overview-meta">
+            <div className="tg-task-overview-stat">
+              <span className="tg-task-overview-stat-label">All tasks</span>
+              <strong>{total}</strong>
+            </div>
+            <div className="tg-task-overview-stat">
+              <span className="tg-task-overview-stat-label">Visible in list</span>
+              <strong>{visibleCount}</strong>
+            </div>
+            <div className="tg-task-overview-stat">
+              <span className="tg-task-overview-stat-label">Layout</span>
+              <strong>{layoutLabel}</strong>
+            </div>
+          </div>
+
+          <div className="tg-task-overview-side-card tg-task-overview-note-card">
+            <div className="tg-task-overview-note-label">Workspace context</div>
+            <div className="tg-task-overview-note">
+              {hasActiveTaskFilters
+                ? `List filter: ${activeTaskFilterLabel}. This snapshot still shows the full board.`
+                : "Filtering the task list below does not change this full-board snapshot."}
+            </div>
+          </div>
+
+          <div className="tg-task-overview-side-card">
+            <div className="tg-task-overview-legend-head">
+              <div className="tg-task-overview-legend-title">Status mix</div>
+              <div className="tg-task-overview-legend-copy">Across the full board</div>
+            </div>
+            <div className="tg-task-overview-legend">
+              {statusLegend.map((item) => (
+                <div className={`tg-task-overview-legend-item ${item.className}`} key={item.key}>
+                  <span className="tg-dot" />
+                  <span className="tg-task-overview-legend-label">{item.label}</span>
+                  <strong>{item.count}</strong>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        <div className="tg-task-overview-canvas-card">
+          <div className="tg-task-overview-canvas-head">
+            <div className="tg-task-overview-canvas-copy">
+              <div className="tg-task-overview-canvas-title">Live Map</div>
+              <div className="tg-task-overview-canvas-subtitle">
+                Compact dependency map with cycle highlighting
+              </div>
+            </div>
+            <div className="tg-task-overview-canvas-badge">Full board</div>
+          </div>
+          <div className="tg-task-overview-flow-shell">
+            {hasOverview ? (
+              <TaskOverviewMap
+                nodes={overviewNodes}
+                edges={overviewEdges}
+                dark={dark}
+              />
+            ) : (
+              <div className="tg-task-overview-empty">
+                <div className="tg-empty-icon">◈</div>
+                <div className="tg-empty-t">No chart yet</div>
+                <div className="tg-empty-s">Add tasks and dependencies to see the full board overview here.</div>
+              </div>
+            )}
+          </div>
+          <div className="tg-task-overview-canvas-note">
+            Full board structure, scaled down for quick scanning.
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TaskListPage({
+  total,
+  visibleCount,
+  hasActiveTaskFilters,
+  activeTaskFilterLabel,
+  statusLegend,
+  overviewNodes,
+  overviewEdges,
+  layoutLabel,
+  dark,
+  records,
+  emptyStateIcon,
+  emptyStateTitle,
+  emptyStateSubtitle,
+  circularGroups,
+  onReviewCircularDependencies,
+  onShowGraph,
+  onTaskToggle,
+  onTaskDelete,
+  onOpenGraphPage,
+}) {
+  const hasRecords = records.length > 0;
+  const visibleLabel = `${visibleCount} of ${total}`;
+  const loopAlertCount = circularGroups.length;
+
+  return (
+    <div className="tg-task-page">
+      <div className="tg-task-page-shell">
+        <div className="tg-task-page-head">
+          <div className="tg-task-page-kicker">Task Workspace</div>
+          <div className="tg-task-page-title">Browse every task in one place</div>
+          <div className="tg-task-page-copy">
+            {hasActiveTaskFilters
+              ? `Showing ${visibleCount} of ${total} tasks in ${activeTaskFilterLabel}.`
+              : `${total} tasks available across your current board.`}
+          </div>
+          <div className="tg-task-page-head-meta">
+            <div className="tg-task-page-head-stat">
+              <span className="tg-task-page-head-stat-label">Tasks in view</span>
+              <span className="tg-task-page-head-stat-value">{visibleLabel}</span>
+            </div>
+            <div className="tg-task-page-head-stat">
+              <span className="tg-task-page-head-stat-label">Active filter</span>
+              <span className="tg-task-page-head-stat-value tg-task-page-head-stat-value--small">
+                {activeTaskFilterLabel}
+              </span>
+            </div>
+            <div className="tg-task-page-head-stat">
+              <span className="tg-task-page-head-stat-label">Loop alerts</span>
+              <span className="tg-task-page-head-stat-value">{loopAlertCount}</span>
+            </div>
+          </div>
+        </div>
+
+        <TaskOverviewPanel
+          total={total}
+          visibleCount={visibleCount}
+          hasActiveTaskFilters={hasActiveTaskFilters}
+          activeTaskFilterLabel={activeTaskFilterLabel}
+          statusLegend={statusLegend}
+          overviewNodes={overviewNodes}
+          overviewEdges={overviewEdges}
+          layoutLabel={layoutLabel}
+          dark={dark}
+          onOpenGraph={onOpenGraphPage}
+        />
+
+        <CircularDependencyBanner
+          groups={circularGroups}
+          onReview={onReviewCircularDependencies}
+        />
+
+        {hasRecords ? (
+          <section className="tg-task-list-section">
+            <div className="tg-task-list-head">
+              <div className="tg-task-list-head-copy">
+                <div className="tg-task-list-kicker">Task Directory</div>
+                <div className="tg-task-list-title">Tasks in view</div>
+                <div className="tg-task-list-copy">
+                  Review dependencies, handle blockers, and jump back to the graph from one focused workspace.
+                </div>
+              </div>
+              <div className="tg-task-list-summary">
+                <span className="tg-task-list-pill">{visibleCount} visible</span>
+                <span className="tg-task-list-pill">{activeTaskFilterLabel}</span>
+              </div>
+            </div>
+
+            <div className="tg-task-list">
+              {records.map((record) => (
+                <article
+                  key={record.node.id}
+                  className={`tg-task-card ${record.isCircular ? "tg-task-card--cycle" : ""}`}
+                >
+                  <div className="tg-task-card-head">
+                    <div className="tg-task-card-copy">
+                      <div className="tg-task-card-title-row">
+                        <h2 className="tg-task-card-title">{record.node.data.label}</h2>
+                        {record.loopLabel && (
+                          <span className="tg-task-loop-pill">{record.loopLabel}</span>
+                        )}
+                      </div>
+                      <div className="tg-task-card-badges">
+                        <span className={`tg-task-badge ${getTaskStatusClassName(record.status)}`}>
+                          {record.statusText}
+                        </span>
+                        {record.isCircular && (
+                          <span className="tg-task-badge tg-status-cycle">Circular</span>
+                        )}
+                      </div>
+                      <div className="tg-task-card-meta">
+                        <span>
+                          {record.parents.length} prerequisite{record.parents.length === 1 ? "" : "s"}
+                        </span>
+                        <span className="tg-task-card-meta-sep">•</span>
+                        <span>
+                          {record.children.length} dependent{record.children.length === 1 ? "" : "s"}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="tg-task-card-actions">
+                      <button
+                        type="button"
+                        className="tg-inline-btn"
+                        onClick={() => onShowGraph(record.node)}
+                      >
+                        View Graph
+                      </button>
+                      <button
+                        type="button"
+                        className="tg-inline-btn"
+                        onClick={() => onTaskToggle(record.node)}
+                      >
+                        {record.node.data.completed ? "Mark Pending" : "Mark Complete"}
+                      </button>
+                      <button
+                        type="button"
+                        className="tg-inline-btn tg-inline-btn--danger"
+                        onClick={() => onTaskDelete(record.node.id, record.node.data.label)}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+
+                  {record.circularSummary && (
+                    <div className="tg-task-callout tg-task-callout--cycle">
+                      {record.circularSummary}
+                    </div>
+                  )}
+                  {record.blockedSummary && (
+                    <div className="tg-task-callout">
+                      {record.blockedSummary}
+                    </div>
+                  )}
+
+                  <div className="tg-task-card-grid">
+                    <div className="tg-task-card-cell">
+                      <div className="tg-task-card-label">Depends on</div>
+                      <div className="tg-task-card-value">
+                        {formatTaskNames(record.parents, "No prerequisites")}
+                      </div>
+                    </div>
+                    <div className="tg-task-card-cell">
+                      <div className="tg-task-card-label">Required by</div>
+                      <div className="tg-task-card-value">
+                        {formatTaskNames(record.children, "No dependent tasks")}
+                      </div>
+                    </div>
+                    <div className="tg-task-card-cell">
+                      <div className="tg-task-card-label">Workflow</div>
+                      <div className="tg-task-card-value">
+                        {record.blockedSummary || getTaskStatusLabel(record.status)}
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : (
+          <div className="tg-task-page-empty">
+            <div className="tg-empty-icon">{emptyStateIcon}</div>
+            <div className="tg-empty-t">{emptyStateTitle}</div>
+            <div className="tg-empty-s">{emptyStateSubtitle}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TaskDetailPage({
+  ownerLabel,
+  total,
+  visibleCount,
+  hasActiveTaskFilters,
+  activeTaskFilterLabel,
+  statusLegend,
+  overviewNodes,
+  overviewEdges,
+  layoutLabel,
+  dark,
+  records,
+  boardSummary,
+  emptyStateIcon,
+  emptyStateTitle,
+  emptyStateSubtitle,
+  circularGroups,
+  onReviewCircularDependencies,
+  onShowGraph,
+  onTaskToggle,
+  onTaskDelete,
+  onOpenGraphPage,
+}) {
+  const hasRecords = records.length > 0;
+  const visibleLabel = `${visibleCount} of ${total}`;
+  const progressPercent = total > 0
+    ? Math.round((boardSummary.completedCount / total) * 100)
+    : 0;
+  const dependencyCount = boardSummary.dependencyCount;
+  const loopAlertCount = circularGroups.length;
+  const detailScopeLabel = hasActiveTaskFilters ? activeTaskFilterLabel : "Full board";
+  const visualMetricMax = Math.max(
+    boardSummary.completedCount,
+    boardSummary.readyCount,
+    boardSummary.blockedCount,
+    boardSummary.unlinkedCount,
+    dependencyCount,
+    loopAlertCount,
+    boardSummary.circularCount || 0,
+    1
+  );
+  const getMetricWidth = (value) => `${Math.max(value > 0 ? 24 : 10, Math.round((value / visualMetricMax) * 100))}%`;
+
+  return (
+    <div className="tg-task-page">
+      <div className="tg-task-page-shell">
+        <div className="tg-task-page-head">
+          <div className="tg-task-page-kicker">Board Detail</div>
+          <div className="tg-task-page-title">Board details</div>
+          <div className="tg-task-page-copy">
+            {hasActiveTaskFilters ? `${visibleLabel} shown` : `${total} tasks`} • {detailScopeLabel}
+          </div>
+          <div className="tg-task-page-head-meta">
+            <div className="tg-task-page-head-stat">
+              <span className="tg-task-page-head-stat-label">Board owner</span>
+              <span className="tg-task-page-head-stat-value tg-task-page-head-stat-value--small">
+                {ownerLabel}
+              </span>
+            </div>
+            <div className="tg-task-page-head-stat">
+              <span className="tg-task-page-head-stat-label">Tasks in view</span>
+              <span className="tg-task-page-head-stat-value">{visibleLabel}</span>
+            </div>
+            <div className="tg-task-page-head-stat">
+              <span className="tg-task-page-head-stat-label">Dependency links</span>
+              <span className="tg-task-page-head-stat-value">{dependencyCount}</span>
+            </div>
+            <div className="tg-task-page-head-stat">
+              <span className="tg-task-page-head-stat-label">Loop alerts</span>
+              <span className="tg-task-page-head-stat-value">{loopAlertCount}</span>
+            </div>
+          </div>
+        </div>
+
+        <TaskOverviewPanel
+          total={total}
+          visibleCount={visibleCount}
+          hasActiveTaskFilters={hasActiveTaskFilters}
+          activeTaskFilterLabel={activeTaskFilterLabel}
+          statusLegend={statusLegend}
+          overviewNodes={overviewNodes}
+          overviewEdges={overviewEdges}
+          layoutLabel={layoutLabel}
+          dark={dark}
+          onOpenGraph={onOpenGraphPage}
+        />
+
+        <CircularDependencyBanner
+          groups={circularGroups}
+          onReview={onReviewCircularDependencies}
+        />
+
+        <div className="tg-detail-grid">
+          <section className="tg-detail-card">
+            <div className="tg-detail-card-head">
+              <div className="tg-detail-card-title">Progress</div>
+              <div className="tg-detail-card-badge">{progressPercent}%</div>
+            </div>
+            <div className="tg-detail-hero">
+              <div className="tg-detail-hero-value">{boardSummary.completedCount}</div>
+              <div className="tg-detail-hero-label">done</div>
+            </div>
+            <div className="tg-detail-progress-track" aria-hidden="true">
+              <div className="tg-detail-progress-fill" style={{width: `${progressPercent}%`}} />
+            </div>
+            <div className="tg-detail-mini-grid">
+              <div className="tg-detail-mini tg-detail-mini--complete">
+                <div className="tg-detail-mini-value">{boardSummary.completedCount}</div>
+                <div className="tg-detail-mini-label">Done</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(boardSummary.completedCount)}} />
+                </div>
+              </div>
+              <div className="tg-detail-mini tg-detail-mini--ready">
+                <div className="tg-detail-mini-value">{boardSummary.readyCount}</div>
+                <div className="tg-detail-mini-label">Ready</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(boardSummary.readyCount)}} />
+                </div>
+              </div>
+              <div className="tg-detail-mini tg-detail-mini--blocked">
+                <div className="tg-detail-mini-value">{boardSummary.blockedCount}</div>
+                <div className="tg-detail-mini-label">Blocked</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(boardSummary.blockedCount)}} />
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="tg-detail-card">
+            <div className="tg-detail-card-head">
+              <div className="tg-detail-card-title">Dependencies</div>
+              <div className="tg-detail-card-badge">{layoutLabel}</div>
+            </div>
+            <div className="tg-detail-hero">
+              <div className="tg-detail-hero-value">{dependencyCount}</div>
+              <div className="tg-detail-hero-label">links</div>
+            </div>
+            <div className="tg-detail-mini-grid">
+              <div className="tg-detail-mini tg-detail-mini--links">
+                <div className="tg-detail-mini-value">{dependencyCount}</div>
+                <div className="tg-detail-mini-label">Links</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(dependencyCount)}} />
+                </div>
+              </div>
+              <div className="tg-detail-mini tg-detail-mini--blocked">
+                <div className="tg-detail-mini-value">{boardSummary.blockedCount}</div>
+                <div className="tg-detail-mini-label">Blocked</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(boardSummary.blockedCount)}} />
+                </div>
+              </div>
+              <div className="tg-detail-mini tg-detail-mini--muted">
+                <div className="tg-detail-mini-value">{boardSummary.unlinkedCount}</div>
+                <div className="tg-detail-mini-label">Needs link</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(boardSummary.unlinkedCount)}} />
+                </div>
+              </div>
+            </div>
+            <div className="tg-detail-tags">
+              <span className="tg-detail-tag">{detailScopeLabel}</span>
+              <span className="tg-detail-tag">{visibleLabel}</span>
+            </div>
+          </section>
+
+          <section className="tg-detail-card">
+            <div className="tg-detail-card-head">
+              <div className="tg-detail-card-title">Loops</div>
+              <div className={`tg-detail-card-badge ${loopAlertCount ? "" : "tg-detail-tag--good"}`}>{loopAlertCount ? "Active" : "Clean"}</div>
+            </div>
+            <div className="tg-detail-hero">
+              <div className="tg-detail-hero-value">{loopAlertCount}</div>
+              <div className="tg-detail-hero-label">active</div>
+            </div>
+            <div className="tg-detail-mini-grid">
+              <div className="tg-detail-mini tg-detail-mini--links">
+                <div className="tg-detail-mini-value">{boardSummary.circularCount || 0}</div>
+                <div className="tg-detail-mini-label">Tasks</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(boardSummary.circularCount || 0)}} />
+                </div>
+              </div>
+              <div className="tg-detail-mini tg-detail-mini--blocked">
+                <div className="tg-detail-mini-value">{loopAlertCount}</div>
+                <div className="tg-detail-mini-label">Loops</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(loopAlertCount)}} />
+                </div>
+              </div>
+              <div className="tg-detail-mini tg-detail-mini--muted">
+                <div className="tg-detail-mini-value">{visibleCount}</div>
+                <div className="tg-detail-mini-label">Visible</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(visibleCount)}} />
+                </div>
+              </div>
+            </div>
+            <div className="tg-detail-tags">
+              <span className={`tg-detail-tag ${loopAlertCount ? "tg-detail-tag--warn" : "tg-detail-tag--good"}`}>
+                {loopAlertCount ? "Needs review" : "No loops"}
+              </span>
+            </div>
+          </section>
+        </div>
+
+        {hasRecords ? (
+          <section className="tg-task-list-section">
+            <div className="tg-task-list-head">
+              <div className="tg-task-list-head-copy">
+                <div className="tg-task-list-kicker">Detailed Directory</div>
+                <div className="tg-task-list-title">Tasks</div>
+              </div>
+              <div className="tg-task-list-summary">
+                <span className="tg-task-list-pill">{visibleCount} detailed</span>
+                <span className="tg-task-list-pill">{activeTaskFilterLabel}</span>
+              </div>
+            </div>
+
+            <div className="tg-task-list">
+              {records.map((record) => {
+                const dependencyTouchpoints = record.parents.length + record.children.length;
+                const completedDependentCount = record.children.filter((child) => child.data.completed).length;
+
+                return (
+                  <article
+                    key={record.node.id}
+                    className={`tg-task-card ${record.isCircular ? "tg-task-card--cycle" : ""}`}
+                  >
+                    <div className="tg-task-card-head">
+                      <div className="tg-task-card-copy">
+                        <div className="tg-task-card-title-row">
+                          <h2 className="tg-task-card-title">{record.node.data.label}</h2>
+                          {record.loopLabel && (
+                            <span className="tg-task-loop-pill">{record.loopLabel}</span>
+                          )}
+                        </div>
+                        <div className="tg-task-card-badges">
+                          <span className={`tg-task-badge ${getTaskStatusClassName(record.status)}`}>
+                            {record.statusText}
+                          </span>
+                          {record.isCircular && (
+                            <span className="tg-task-badge tg-status-cycle">Circular</span>
+                          )}
+                        </div>
+                        <div className="tg-task-card-meta">
+                          <span>
+                            {record.parents.length} prerequisite{record.parents.length === 1 ? "" : "s"}
+                          </span>
+                          <span className="tg-task-card-meta-sep">•</span>
+                          <span>
+                            {record.children.length} dependent{record.children.length === 1 ? "" : "s"}
+                          </span>
+                          <span className="tg-task-card-meta-sep">•</span>
+                          <span>
+                            {dependencyTouchpoints} total connection{dependencyTouchpoints === 1 ? "" : "s"}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="tg-task-card-actions">
+                        <button
+                          type="button"
+                          className="tg-inline-btn"
+                          onClick={() => onShowGraph(record.node)}
+                        >
+                          View Graph
+                        </button>
+                        <button
+                          type="button"
+                          className="tg-inline-btn"
+                          onClick={() => onTaskToggle(record.node)}
+                        >
+                          {record.node.data.completed ? "Mark Pending" : "Mark Complete"}
+                        </button>
+                        <button
+                          type="button"
+                          className="tg-inline-btn tg-inline-btn--danger"
+                          onClick={() => onTaskDelete(record.node.id, record.node.data.label)}
+                        >
+                          Delete
+                      </button>
+                    </div>
+                  </div>
+
+                    <div className="tg-task-card-grid">
+                      <div className="tg-task-card-cell">
+                        <div className="tg-task-card-label">Workflow</div>
+                        <div className="tg-task-card-value">
+                          {record.statusText}
+                        </div>
+                      </div>
+                      <div className="tg-task-card-cell">
+                        <div className="tg-task-card-label">Waiting on</div>
+                        <div className="tg-task-card-value">
+                          {formatTaskNames(record.blockers, "Ready")}
+                        </div>
+                      </div>
+                      <div className="tg-task-card-cell">
+                        <div className="tg-task-card-label">Depends on</div>
+                        <div className="tg-task-card-value">
+                          {formatTaskNames(record.parents, "No prerequisites")}
+                        </div>
+                      </div>
+                      <div className="tg-task-card-cell">
+                        <div className="tg-task-card-label">Required by</div>
+                        <div className="tg-task-card-value">
+                          {formatTaskNames(record.children, "No dependent tasks")}
+                        </div>
+                      </div>
+                      <div className="tg-task-card-cell">
+                        <div className="tg-task-card-label">Impact</div>
+                        <div className="tg-task-card-value">
+                          {record.children.length
+                            ? `${completedDependentCount}/${record.children.length} done`
+                            : "No downstream"}
+                        </div>
+                      </div>
+                      <div className="tg-task-card-cell">
+                        <div className="tg-task-card-label">Next</div>
+                        <div className="tg-task-card-value">
+                          {getTaskRecommendedAction(record)}
+                        </div>
+                      </div>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        ) : (
+          <div className="tg-task-page-empty">
+            <div className="tg-empty-icon">{emptyStateIcon}</div>
+            <div className="tg-empty-t">{emptyStateTitle}</div>
+            <div className="tg-empty-s">{emptyStateSubtitle}</div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CircularDependencyPage({
+  ownerLabel,
+  total,
+  circularTaskCount,
+  groups,
+  loopRecords,
+  statusLegend,
+  overviewNodes,
+  overviewEdges,
+  layoutLabel,
+  dark,
+  onOpenGraphPage,
+  onFocusGraph,
+  onShowTask,
+  graphShellRef,
+  children,
+}) {
+  const hasLoops = groups.length > 0;
+
+  return (
+    <div className="tg-task-page">
+      <div className="tg-task-page-shell">
+        <div className="tg-task-page-head">
+          <div className="tg-task-page-kicker">Dependency Monitor</div>
+          <div className="tg-task-page-title">Circular dependency review</div>
+          <div className="tg-task-page-copy">
+            {hasLoops
+              ? `${ownerLabel} currently has ${groups.length} circular dependenc${groups.length===1 ? "y" : "ies"} across ${circularTaskCount} task${circularTaskCount===1 ? "" : "s"}.`
+              : `${ownerLabel} does not have any circular dependencies right now.`}
+          </div>
+          <div className="tg-task-page-head-meta">
+            <div className="tg-task-page-head-stat">
+              <span className="tg-task-page-head-stat-label">Board owner</span>
+              <span className="tg-task-page-head-stat-value tg-task-page-head-stat-value--small">
+                {ownerLabel}
+              </span>
+            </div>
+            <div className="tg-task-page-head-stat">
+              <span className="tg-task-page-head-stat-label">Impacted tasks</span>
+              <span className="tg-task-page-head-stat-value">{circularTaskCount}</span>
+            </div>
+            <div className="tg-task-page-head-stat">
+              <span className="tg-task-page-head-stat-label">Detected loops</span>
+              <span className="tg-task-page-head-stat-value">{groups.length}</span>
+            </div>
+          </div>
+        </div>
+
+        <TaskOverviewPanel
+          total={total}
+          visibleCount={circularTaskCount}
+          hasActiveTaskFilters={hasLoops}
+          activeTaskFilterLabel={hasLoops ? "Circular tasks" : "No circular tasks"}
+          statusLegend={statusLegend}
+          overviewNodes={overviewNodes}
+          overviewEdges={overviewEdges}
+          layoutLabel={layoutLabel}
+          dark={dark}
+          onOpenGraph={onOpenGraphPage}
+        />
+
+        <CircularDependencyBanner
+          groups={groups}
+          onReview={onFocusGraph}
+        />
+
+        {hasLoops ? (
+          <section className="tg-task-list-section">
+            <div className="tg-task-list-head">
+              <div className="tg-task-list-head-copy">
+                <div className="tg-task-list-kicker">Loop Directory</div>
+                <div className="tg-task-list-title">Detected circular groups</div>
+                <div className="tg-task-list-copy">
+                  Review each loop, inspect which tasks are involved, then jump to the chart to remove one dependency edge from that cycle.
+                </div>
+              </div>
+              <div className="tg-task-list-summary">
+                <span className="tg-task-list-pill">{groups.length} loop{groups.length===1 ? "" : "s"}</span>
+                <span className="tg-task-list-pill">{circularTaskCount} tasks impacted</span>
+              </div>
+            </div>
+
+            <div className="tg-task-list">
+              {loopRecords.map((loop) => (
+                <article
+                  key={loop.label}
+                  className="tg-task-card tg-task-card--cycle"
+                >
+                  <div className="tg-task-card-head">
+                    <div className="tg-task-card-copy">
+                      <div className="tg-task-card-title-row">
+                        <h2 className="tg-task-card-title">{loop.label}</h2>
+                      </div>
+                      <div className="tg-task-card-badges">
+                        <span className="tg-task-badge tg-status-cycle">Circular</span>
+                        <span className="tg-task-badge tg-status-pending">{loop.edgeIds.length} link{loop.edgeIds.length===1 ? "" : "s"}</span>
+                      </div>
+                      <div className="tg-task-card-meta">
+                        <span>{loop.nodes.length} task{loop.nodes.length===1 ? "" : "s"} involved</span>
+                        <span className="tg-task-card-meta-sep">•</span>
+                        <span>{loop.summary}</span>
+                      </div>
+                    </div>
+                    <div className="tg-task-card-actions">
+                      <button
+                        type="button"
+                        className="tg-inline-btn"
+                        onClick={onFocusGraph}
+                      >
+                        Focus Chart
+                      </button>
+                      {loop.nodes[0] && (
+                        <button
+                          type="button"
+                          className="tg-inline-btn tg-inline-btn--ghost"
+                          onClick={() => onShowTask(loop.nodes[0])}
+                        >
+                          Highlight Task
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="tg-task-callout tg-task-callout--cycle">
+                    {loop.summary}. Remove one dependency edge from this loop to restore a valid workflow.
+                  </div>
+
+                  <div className="tg-task-card-grid">
+                    <div className="tg-task-card-cell">
+                      <div className="tg-task-card-label">Tasks in loop</div>
+                      <div className="tg-task-card-value">
+                        {loop.nodes.map(node => node.data.label).join(", ")}
+                      </div>
+                    </div>
+                    <div className="tg-task-card-cell">
+                      <div className="tg-task-card-label">Loop edges</div>
+                      <div className="tg-task-card-value">
+                        {loop.edgeIds.length}
+                      </div>
+                    </div>
+                    <div className="tg-task-card-cell">
+                      <div className="tg-task-card-label">Recommended action</div>
+                      <div className="tg-task-card-value">
+                        Remove one dependency from the highlighted chart below.
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : (
+          <div className="tg-task-page-empty">
+            <div className="tg-empty-icon">✓</div>
+            <div className="tg-empty-t">No loops detected</div>
+            <div className="tg-empty-s">
+              This board currently has a clean dependency flow. Any circular dependency you add or import will appear here with a highlighted chart.
+            </div>
+          </div>
+        )}
+
+        <div className="tg-admin-graph-shell" ref={graphShellRef}>
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminBoardWorkspace({
+  selectedUser,
+  boardLabel,
+  boardCount,
+  totalUsers,
+  filteredUserCount,
+  summary,
+  blockedRecords,
+  circularGroups,
+  onFocusBlockedTasks,
+  onReviewCircularDependencies,
+  onShowTask,
+  graphShellRef,
+  children,
+}) {
+  const hasSelectedUser = Boolean(selectedUser?.uid);
+  const selectedUserName = hasSelectedUser
+    ? formatUserDisplayName(selectedUser)
+    : "Select a user board";
+  const selectedUserEmail = hasSelectedUser
+    ? (selectedUser?.email || "No email")
+    : "No board selected";
+  const previewBlockedRecords = blockedRecords.slice(0, 5);
+  const previewCircularGroups = circularGroups.slice(0, 5);
+  const adminMetricMax = Math.max(
+    summary.taskCount,
+    summary.readyCount,
+    summary.blockedCount,
+    summary.unlinkedCount,
+    summary.circularCount,
+    summary.dependencyCount,
+    1
+  );
+  const getMetricWidth = (value) => `${Math.max(value > 0 ? 24 : 10, Math.round((value / adminMetricMax) * 100))}%`;
+
+  return (
+    <div className="tg-admin-page">
+      <div className="tg-admin-shell">
+        <section className="tg-admin-head">
+          <div className="tg-admin-kicker">Admin Control Center</div>
+          <div className="tg-admin-title">
+            {hasSelectedUser ? `${selectedUserName} • ${boardLabel}` : boardLabel}
+          </div>
+          <div className="tg-admin-copy">
+            Live board overview
+          </div>
+          <div className="tg-detail-tags tg-admin-head-tags">
+            <span className="tg-detail-tag">{selectedUserEmail}</span>
+            <span className="tg-detail-tag">{boardLabel}</span>
+            <span className="tg-detail-tag">{boardCount} board{boardCount === 1 ? "" : "s"}</span>
+            <span className="tg-detail-tag">{filteredUserCount} / {totalUsers} users</span>
+            <span className={`tg-detail-tag ${summary.circularCount ? "tg-detail-tag--warn" : "tg-detail-tag--good"}`}>
+              {summary.circularCount ? "Loop alerts" : "Clean flow"}
+            </span>
+            <span className={`tg-detail-tag ${summary.blockedCount ? "tg-detail-tag--warn" : "tg-detail-tag--good"}`}>
+              {summary.blockedCount ? "Blocked work" : "No blockers"}
+            </span>
+          </div>
+          <div className="tg-admin-meta">
+            <div className="tg-admin-stat">
+              <span className="tg-admin-stat-label">Selected user</span>
+              <span className="tg-admin-stat-value">{selectedUserName}</span>
+            </div>
+            <div className="tg-admin-stat">
+              <span className="tg-admin-stat-label">Directory</span>
+              <span className="tg-admin-stat-value">{filteredUserCount} / {totalUsers}</span>
+            </div>
+            <div className="tg-admin-stat">
+              <span className="tg-admin-stat-label">Blocked tasks</span>
+              <span className="tg-admin-stat-value">{summary.blockedCount}</span>
+            </div>
+            <div className="tg-admin-stat">
+              <span className="tg-admin-stat-label">Circular tasks</span>
+              <span className="tg-admin-stat-value">{summary.circularCount}</span>
+            </div>
+          </div>
+        </section>
+
+        <div className="tg-detail-grid">
+          <section className="tg-detail-card">
+            <div className="tg-detail-card-head">
+              <div className="tg-detail-card-title">Control</div>
+              <div className="tg-detail-card-badge">{hasSelectedUser ? "Live" : "Idle"}</div>
+            </div>
+            <div className="tg-detail-hero">
+              <div className="tg-detail-hero-value">{summary.taskCount}</div>
+              <div className="tg-detail-hero-label">tasks</div>
+            </div>
+            <div className="tg-detail-tags">
+              <span className="tg-detail-tag">{selectedUserName}</span>
+              <span className="tg-detail-tag">{boardLabel}</span>
+            </div>
+            <div className="tg-admin-action-row">
+              <button
+                type="button"
+                className="tg-inline-btn"
+                onClick={onFocusBlockedTasks}
+              >
+                Show blockers
+              </button>
+              <button
+                type="button"
+                className="tg-inline-btn tg-inline-btn--ghost"
+                onClick={onReviewCircularDependencies}
+              >
+                Review loops
+              </button>
+            </div>
+          </section>
+
+          <section className="tg-detail-card">
+            <div className="tg-detail-card-head">
+              <div className="tg-detail-card-title">Health</div>
+              <div className="tg-detail-card-badge">{summary.dependencyCount} links</div>
+            </div>
+            <div className="tg-detail-mini-grid">
+              <div className="tg-detail-mini tg-detail-mini--ready">
+                <div className="tg-detail-mini-value">{summary.readyCount}</div>
+                <div className="tg-detail-mini-label">Ready</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(summary.readyCount)}} />
+                </div>
+              </div>
+              <div className="tg-detail-mini tg-detail-mini--blocked">
+                <div className="tg-detail-mini-value">{summary.blockedCount}</div>
+                <div className="tg-detail-mini-label">Blocked</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(summary.blockedCount)}} />
+                </div>
+              </div>
+              <div className="tg-detail-mini tg-detail-mini--links">
+                <div className="tg-detail-mini-value">{summary.dependencyCount}</div>
+                <div className="tg-detail-mini-label">Links</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(summary.dependencyCount)}} />
+                </div>
+              </div>
+            </div>
+            <div className="tg-detail-tags">
+              <span className="tg-detail-tag">{summary.unlinkedCount} need link</span>
+              <span className="tg-detail-tag">{filteredUserCount} in view</span>
+            </div>
+          </section>
+
+          <section className="tg-detail-card">
+            <div className="tg-detail-card-head">
+              <div className="tg-detail-card-title">Alerts</div>
+              <div className={`tg-detail-card-badge ${summary.circularCount ? "" : "tg-detail-tag--good"}`}>
+                {summary.circularCount ? "Active" : "Clean"}
+              </div>
+            </div>
+            <div className="tg-detail-mini-grid">
+              <div className="tg-detail-mini tg-detail-mini--blocked">
+                <div className="tg-detail-mini-value">{summary.blockedCount}</div>
+                <div className="tg-detail-mini-label">Blocked</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(summary.blockedCount)}} />
+                </div>
+              </div>
+              <div className="tg-detail-mini tg-detail-mini--links">
+                <div className="tg-detail-mini-value">{summary.circularCount}</div>
+                <div className="tg-detail-mini-label">Looped</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(summary.circularCount)}} />
+                </div>
+              </div>
+              <div className="tg-detail-mini tg-detail-mini--muted">
+                <div className="tg-detail-mini-value">{summary.taskCount}</div>
+                <div className="tg-detail-mini-label">Total</div>
+                <div className="tg-detail-mini-bar" aria-hidden="true">
+                  <span style={{width: getMetricWidth(summary.taskCount)}} />
+                </div>
+              </div>
+            </div>
+            <div className="tg-detail-tags">
+              <span className={`tg-detail-tag ${summary.blockedCount ? "tg-detail-tag--warn" : "tg-detail-tag--good"}`}>
+                {summary.blockedCount ? "Needs action" : "Stable"}
+              </span>
+            </div>
+          </section>
+        </div>
+
+        <div className="tg-admin-grid">
+          <section className="tg-admin-card">
+            <div className="tg-admin-section-head">
+              <div className="tg-admin-card-title">Blocked tasks</div>
+              <div className="tg-detail-card-badge">{blockedRecords.length}</div>
+            </div>
+            {previewBlockedRecords.length ? (
+              <div className="tg-admin-issue-list">
+                {previewBlockedRecords.map((record) => (
+                  <div key={record.node.id} className="tg-admin-issue-item">
+                    <div className="tg-admin-issue-copy">
+                      <div className="tg-admin-issue-title">{record.node.data.label}</div>
+                      <div className="tg-admin-issue-badges">
+                        <span className="tg-detail-tag tg-detail-tag--warn">{record.blockers.length} blocker{record.blockers.length === 1 ? "" : "s"}</span>
+                        <span className="tg-detail-tag">{formatCompactTaskNames(record.blockers, "Upstream", 2)}</span>
+                      </div>
+                    </div>
+                    <div className="tg-admin-issue-actions">
+                      <button
+                        type="button"
+                        className="tg-inline-btn"
+                        onClick={() => onShowTask(record.node)}
+                      >
+                        Focus task
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="tg-admin-empty">
+                No blocked tasks
+              </div>
+            )}
+          </section>
+
+          <section className="tg-admin-card">
+            <div className="tg-admin-section-head">
+              <div className="tg-admin-card-title">Loop watch</div>
+              <div className="tg-detail-card-badge">{circularGroups.length}</div>
+            </div>
+            {previewCircularGroups.length ? (
+              <div className="tg-admin-issue-list">
+                {previewCircularGroups.map((group) => (
+                  <div key={group.label} className="tg-admin-issue-item">
+                    <div className="tg-admin-issue-copy">
+                      <div className="tg-admin-issue-title">{group.label}</div>
+                      <div className="tg-admin-issue-badges">
+                        <span className="tg-detail-tag tg-detail-tag--warn">{group.nodeIds.length} task{group.nodeIds.length === 1 ? "" : "s"}</span>
+                        <span className="tg-detail-tag">{group.edgeIds.length} link{group.edgeIds.length === 1 ? "" : "s"}</span>
+                      </div>
+                    </div>
+                    <div className="tg-admin-issue-actions">
+                      <button
+                        type="button"
+                        className="tg-inline-btn tg-inline-btn--ghost"
+                        onClick={onReviewCircularDependencies}
+                      >
+                        Filter loops
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="tg-admin-empty">
+                No circular dependencies
+              </div>
+            )}
+          </section>
+        </div>
+
+        <div className="tg-admin-graph-shell" ref={graphShellRef}>
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function buildTaskFilterEmptyMessage(searchTerm, filterLabel, hasStatusFilter) {
   const trimmedSearch = searchTerm.trim();
 
@@ -3176,6 +6601,32 @@ function buildTaskFilterEmptyMessage(searchTerm, filterLabel, hasStatusFilter) {
   }
 
   return `No tasks currently match ${filterLabel}. Try another status filter.`;
+}
+
+function buildTaskToggleConfirmation({label, wasCompleted, dependentCount}) {
+  const dependentLabel = dependentCount === 1 ? "task" : "tasks";
+
+  if (wasCompleted) {
+    return {
+      icon: "↺",
+      title: "Mark Task As Pending",
+      message: dependentCount > 0
+        ? `Move "${label}" back to pending? ${dependentCount} dependent ${dependentLabel} may become blocked again until this task is completed.`
+        : `Move "${label}" back to pending? This will return it to your active work queue.`,
+      danger: false,
+      confirmLabel: "Mark Pending",
+    };
+  }
+
+  return {
+    icon: "✅",
+    title: "Mark Task Complete",
+    message: dependentCount > 0
+      ? `Mark "${label}" as completed? ${dependentCount} dependent ${dependentLabel} will be re-evaluated immediately after this update.`
+      : `Mark "${label}" as completed? This will update your progress and keep your board in sync.`,
+    danger: false,
+    confirmLabel: "Mark Complete",
+  };
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -3205,6 +6656,18 @@ export default function App() {
   const [welcomeBanner, setWelcomeBanner] = useState(null);
   const [boardReady, setBoardReady] = useState(false);
   const [boardError, setBoardError] = useState("");
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminReady, setAdminReady] = useState(false);
+  const [adminDirectoryError, setAdminDirectoryError] = useState("");
+  const [adminUserSearch, setAdminUserSearch] = useState("");
+  const [adminSelectedUserId, setAdminSelectedUserId] = useState("");
+  const [adminProfiles, setAdminProfiles] = useState([]);
+  const [boardProfiles, setBoardProfiles] = useState([]);
+  const [boardWorkspaceMode, setBoardWorkspaceMode] = useState("boards");
+  const [boardDirectoryReady, setBoardDirectoryReady] = useState(false);
+  const [boardDirectoryError, setBoardDirectoryError] = useState("");
+  const [selectedBoardId, setSelectedBoardId] = useState("");
+  const [newBoardName, setNewBoardName] = useState("");
   const [isMobileViewport, setIsMobileViewport] = useState(initialMobileViewport);
   const [isCompactViewport, setIsCompactViewport] = useState(initialCompactViewport);
   const [dark, setDark] = useState(() => {
@@ -3235,12 +6698,63 @@ export default function App() {
   const flowRef    = useRef(null);
   const graphRef   = useRef(null);
   const importFileRef = useRef(null);
+  const adminGraphShellRef = useRef(null);
+  const cycleGraphShellRef = useRef(null);
   const pendingDashboardWelcome = useRef(false);
   const hasShownDashboardWelcome = useRef(false);
   const previousMobileViewport = useRef(initialMobileViewport);
   const suppressNodeClickRef = useRef(false);
   const interactionSuppressTimerRef = useRef(null);
   const legacyLayoutHydratingRef = useRef(false);
+  const dragMetaRef = useRef(null);
+  const lastWorkspaceRoute = useRef(ROUTES.dashboard);
+  const previousCircularSignature = useRef("");
+  const sortedAdminProfiles = sortAdminUsers(adminProfiles, user?.uid || "");
+  const filteredAdminProfiles = sortedAdminProfiles.filter(profile =>
+    matchesAdminUserSearch(profile, adminUserSearch)
+  );
+  const sortedBoardProfiles = sortBoardProfiles(boardProfiles);
+  const boardProfileById = new Map(sortedBoardProfiles.map(profile => [profile.id, profile]));
+  const adminProfileById = new Map(adminProfiles.map(profile => [profile.uid, profile]));
+  const adminModeActive = route === ROUTES.admin || route === ROUTES.cycles || route === ROUTES.details;
+  const activeBoardUserId = user
+    ? (adminModeActive && isAdmin ? (adminSelectedUserId || user.uid) : user.uid)
+    : "";
+  const activeBoardProfile = !activeBoardUserId
+    ? null
+    : activeBoardUserId === user?.uid
+      ? normalizeAdminUserProfile(
+          {
+            uid: user.uid,
+            email: user.email,
+            displayName: user.displayName,
+          },
+          user.uid
+        )
+      : adminProfileById.get(activeBoardUserId) || normalizeAdminUserProfile(
+          { uid: activeBoardUserId },
+          activeBoardUserId
+        );
+  const activeBoardOwnerLabel = activeBoardProfile
+    ? formatUserDisplayName(activeBoardProfile)
+    : "Select a user";
+  const activeBoardProfileEmail = activeBoardProfile?.email || "";
+  const activeBoardProfileName = activeBoardProfile?.displayName || "";
+  const activeBoardIsDelegated = Boolean(
+    user &&
+    activeBoardUserId &&
+    activeBoardUserId !== user.uid
+  );
+  const effectiveBoardId = selectedBoardId && boardProfileById.has(selectedBoardId)
+    ? selectedBoardId
+    : (sortedBoardProfiles[0]?.id || "");
+  const activeWorkspaceBoardId = activeBoardUserId ? effectiveBoardId : "";
+  const activeBoardProfileSummary = activeWorkspaceBoardId
+    ? boardProfileById.get(activeWorkspaceBoardId) || null
+    : null;
+  const activeBoardLabel = activeBoardProfileSummary?.name || DEFAULT_BOARD_NAME;
+  const usingLegacyBoardData = boardWorkspaceMode === "legacy";
+  const activeStorageBoardId = usingLegacyBoardData ? "" : activeWorkspaceBoardId;
 
   const navigate = useCallback((nextRoute, {replace=false} = {}) => {
     const normalizedRoute = normalizeRoute(nextRoute);
@@ -3272,6 +6786,67 @@ export default function App() {
     });
   },[isCompactViewport]);
 
+  const focusVisibleGraph = useCallback((delay = 120) => {
+    const targetGraphShell = route === ROUTES.admin
+      ? adminGraphShellRef.current
+      : route === ROUTES.cycles
+        ? cycleGraphShellRef.current
+        : null;
+    if (!targetGraphShell) return;
+
+    window.setTimeout(() => {
+      targetGraphShell.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+      fitGraph(260);
+    }, delay);
+  }, [fitGraph, route]);
+
+  const ensureBoardWorkspace = useCallback(async (userId) => {
+    if (!userId) return;
+
+    const boardSnapshot = await getDocs(getUserBoardsCollection(userId));
+    if (boardSnapshot.docs.length) {
+      return;
+    }
+
+    const [legacyNodeSnapshot, legacyEdgeSnapshot] = await Promise.all([
+      getDocs(getUserNodesCollection(userId)),
+      getDocs(getUserEdgesCollection(userId)),
+    ]);
+
+    const legacyNodes = legacyNodeSnapshot.docs
+      .map(snapshot => snapshot.data())
+      .filter(item => item?.id);
+    const legacyEdges = legacyEdgeSnapshot.docs
+      .map(snapshot => snapshot.data())
+      .filter(item => item?.source && item?.target)
+      .map(edge => ({
+        ...edge,
+        id: edge.id || buildDependencyEdgeId(edge.source, edge.target),
+        animated: edge.animated !== false,
+      }));
+
+    const operations = [
+      batch => batch.set(
+        getUserBoardDoc(userId, DEFAULT_BOARD_ID),
+        buildBoardProfile({ name: DEFAULT_BOARD_NAME }, legacyNodes, legacyEdges)
+      ),
+      ...legacyNodes.map(node => (
+        batch => batch.set(getUserNodeDoc(userId, node.id, DEFAULT_BOARD_ID), node)
+      )),
+      ...legacyEdges.map(edge => (
+        batch => batch.set(
+          getUserEdgeDoc(userId, buildDependencyDocId(edge.source, edge.target), DEFAULT_BOARD_ID),
+          edge
+        )
+      )),
+    ];
+
+    await commitFirestoreOperations(operations);
+  }, []);
+
   useEffect(() => () => {
     if (interactionSuppressTimerRef.current) {
       clearTimeout(interactionSuppressTimerRef.current);
@@ -3283,18 +6858,60 @@ export default function App() {
       return false;
     }
 
+    if (!activeBoardUserId) {
+      toast("Choose a user board before taking admin actions.", "info");
+      return false;
+    }
+
+    if (!boardDirectoryReady) {
+      toast("Board list is still syncing. Please wait a moment.", "info");
+      return false;
+    }
+
+    if (boardDirectoryError) {
+      toast(boardDirectoryError, "error");
+      return false;
+    }
+
+    if (!activeWorkspaceBoardId) {
+      toast("Choose a board before taking action.", "info");
+      return false;
+    }
+
     if (!boardReady) {
-      toast("Your task board is still syncing. Please wait a moment.", "info");
+      toast(
+        activeBoardIsDelegated
+          ? `${activeBoardOwnerLabel}'s ${activeBoardLabel} board is still syncing. Please wait a moment.`
+          : `${activeBoardLabel} is still syncing. Please wait a moment.`,
+        "info"
+      );
       return false;
     }
 
     if (boardError) {
-      toast("Cloud sync is unavailable right now. Refresh and try again.", "error");
+      toast(
+        activeBoardIsDelegated
+          ? `Cloud sync is unavailable for ${activeBoardOwnerLabel}'s ${activeBoardLabel} board right now.`
+          : "Cloud sync is unavailable right now. Refresh and try again.",
+        "error"
+      );
       return false;
     }
 
     return true;
-  }, [boardError, boardReady, toast, user]);
+  }, [
+    activeBoardLabel,
+    activeBoardIsDelegated,
+    activeBoardOwnerLabel,
+    activeBoardUserId,
+    activeWorkspaceBoardId,
+    boardError,
+    boardDirectoryError,
+    boardDirectoryReady,
+    boardReady,
+    toast,
+    user,
+  ]);
 
   // Inject CSS
   useEffect(()=>{
@@ -3371,13 +6988,13 @@ export default function App() {
   }, [editTaskId, nodes]);
 
   // Confirm helper
-  const confirm=(opts)=>new Promise(resolve=>{
+  const confirm=useCallback((opts)=>new Promise(resolve=>{
     mResolve.current=resolve;
     setModal({...opts,
       onConfirm:()=>{setModal(null);resolve(true);},
       onCancel: ()=>{setModal(null);resolve(false);}
     });
-  });
+  }), []);
 
   // Auth listener
   useEffect(()=>{
@@ -3388,9 +7005,167 @@ export default function App() {
   },[]);
 
   useEffect(() => {
+    if (!user) {
+      setIsAdmin(false);
+      setAdminReady(true);
+      return undefined;
+    }
+
+    setAdminReady(false);
+
+    return onSnapshot(
+      doc(db, "admins", user.uid),
+      snapshot => {
+        setIsAdmin(snapshot.exists());
+        setAdminReady(true);
+      },
+      () => {
+        setIsAdmin(false);
+        setAdminReady(true);
+      }
+    );
+  }, [user]);
+
+  useEffect(() => {
+    if (!user || !isAdmin) {
+      setAdminProfiles([]);
+      setAdminDirectoryError("");
+      setAdminSelectedUserId("");
+      return undefined;
+    }
+
+    return onSnapshot(
+      collection(db, "users"),
+      snapshot => {
+        setAdminProfiles(
+          snapshot.docs
+            .map(docSnapshot => normalizeAdminUserProfile(docSnapshot.data(), docSnapshot.id))
+            .filter(profile => profile.uid)
+        );
+        setAdminDirectoryError("");
+      },
+      () => {
+        setAdminProfiles([]);
+        setAdminDirectoryError("We couldn't load the user directory for the admin panel.");
+      }
+    );
+  }, [isAdmin, user]);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    if (!filteredAdminProfiles.length) return;
+    if (filteredAdminProfiles.some(profile => profile.uid === adminSelectedUserId)) return;
+
+    const preferredProfile = filteredAdminProfiles.find(profile => profile.uid !== user?.uid)
+      || filteredAdminProfiles[0];
+    setAdminSelectedUserId(preferredProfile?.uid || "");
+  }, [adminSelectedUserId, filteredAdminProfiles, isAdmin, user]);
+
+  useEffect(() => {
+    if (!user || !activeBoardUserId) {
+      setBoardProfiles([]);
+      setBoardWorkspaceMode("boards");
+      setBoardDirectoryReady(false);
+      setBoardDirectoryError("");
+      setSelectedBoardId("");
+      setNewBoardName("");
+      return undefined;
+    }
+
+    let active = true;
+    let unsubscribe = () => {};
+
+    setBoardProfiles([]);
+    setBoardWorkspaceMode("boards");
+    setBoardDirectoryReady(false);
+    setBoardDirectoryError("");
+    setNewBoardName("");
+
+    (async () => {
+      try {
+        await ensureBoardWorkspace(activeBoardUserId);
+        if (!active) return;
+
+        unsubscribe = onSnapshot(
+          getUserBoardsCollection(activeBoardUserId),
+          snapshot => {
+            if (!active) return;
+            setBoardWorkspaceMode("boards");
+            setBoardProfiles(
+              snapshot.docs
+                .map(docSnapshot => normalizeBoardProfile(docSnapshot.data(), docSnapshot.id))
+                .filter(profile => profile.id)
+            );
+            setBoardDirectoryReady(true);
+            setBoardDirectoryError("");
+          },
+          () => {
+            if (!active) return;
+            setBoardWorkspaceMode("legacy");
+            setBoardProfiles([
+              normalizeBoardProfile({ name: DEFAULT_BOARD_NAME }, DEFAULT_BOARD_ID),
+            ]);
+            setSelectedBoardId(DEFAULT_BOARD_ID);
+            setBoardDirectoryReady(true);
+            setBoardDirectoryError("");
+          }
+        );
+      } catch (error) {
+        if (!active) return;
+        setBoardWorkspaceMode("legacy");
+        setBoardProfiles([
+          normalizeBoardProfile({ name: DEFAULT_BOARD_NAME }, DEFAULT_BOARD_ID),
+        ]);
+        setSelectedBoardId(DEFAULT_BOARD_ID);
+        setBoardDirectoryReady(true);
+        setBoardDirectoryError("");
+      }
+    })();
+
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [activeBoardUserId, ensureBoardWorkspace, user]);
+
+  useEffect(() => {
+    if (!sortedBoardProfiles.length) {
+      if (selectedBoardId) {
+        setSelectedBoardId("");
+      }
+      return;
+    }
+
+    if (sortedBoardProfiles.some(profile => profile.id === selectedBoardId)) {
+      return;
+    }
+
+    setSelectedBoardId(sortedBoardProfiles[0].id);
+  }, [selectedBoardId, sortedBoardProfiles]);
+
+  useEffect(() => {
+    if (
+      route === ROUTES.dashboard ||
+      route === ROUTES.tasks ||
+      route === ROUTES.details ||
+      route === ROUTES.cycles ||
+      route === ROUTES.admin
+    ) {
+      lastWorkspaceRoute.current = route;
+    }
+  }, [route]);
+
+  useEffect(() => {
     if (!authReady) return;
 
-    if (!user && (route === ROUTES.dashboard || route === ROUTES.profile)) {
+    if (!user && (
+      route === ROUTES.dashboard ||
+      route === ROUTES.tasks ||
+      route === ROUTES.details ||
+      route === ROUTES.cycles ||
+      route === ROUTES.admin ||
+      route === ROUTES.profile
+    )) {
       navigate(ROUTES.login, {replace: true});
       return;
     }
@@ -3401,7 +7176,20 @@ export default function App() {
   }, [authReady, navigate, route, user]);
 
   useEffect(() => {
-    if (route !== ROUTES.dashboard) return undefined;
+    if (!user || route !== ROUTES.admin || !adminReady) return;
+    if (isAdmin) return;
+
+    toast("Admin access is limited to approved accounts.", "error");
+    navigate(ROUTES.dashboard, {replace: true});
+  }, [adminReady, isAdmin, navigate, route, toast, user]);
+
+  useEffect(() => {
+    if (
+      route !== ROUTES.dashboard &&
+      route !== ROUTES.tasks &&
+      route !== ROUTES.details &&
+      route !== ROUTES.cycles
+    ) return undefined;
     if (!authReady || !user) return undefined;
 
     const shouldShowWelcome =
@@ -3426,7 +7214,10 @@ export default function App() {
   }, [welcomeBanner]);
 
   useEffect(() => {
-    if (route === ROUTES.dashboard && user) return;
+    if (
+      (route === ROUTES.dashboard || route === ROUTES.tasks || route === ROUTES.details || route === ROUTES.cycles) &&
+      user
+    ) return;
     setWelcomeBanner(null);
   }, [route, user]);
 
@@ -3441,6 +7232,38 @@ export default function App() {
       setNodes([]);
       setEdges([]);
       setBoardReady(false);
+      setBoardError("");
+      return undefined;
+    }
+
+    if (!boardDirectoryReady) {
+      setNodes([]);
+      setEdges([]);
+      setBoardReady(false);
+      setBoardError("");
+      return undefined;
+    }
+
+    if (boardDirectoryError) {
+      setNodes([]);
+      setEdges([]);
+      setBoardReady(true);
+      setBoardError(boardDirectoryError);
+      return undefined;
+    }
+
+    if (!activeWorkspaceBoardId) {
+      setNodes([]);
+      setEdges([]);
+      setBoardReady(true);
+      setBoardError("");
+      return undefined;
+    }
+
+    if (!activeBoardUserId) {
+      setNodes([]);
+      setEdges([]);
+      setBoardReady(true);
       setBoardError("");
       return undefined;
     }
@@ -3474,7 +7297,7 @@ export default function App() {
     };
 
     const unsubscribeNodes = onSnapshot(
-      collection(db,"users",user.uid,"nodes"),
+      getUserNodesCollection(activeBoardUserId, activeStorageBoardId),
       snapshot => {
         if (!active) return;
         setNodes(snapshot.docs.map(docSnapshot => docSnapshot.data()));
@@ -3484,7 +7307,7 @@ export default function App() {
       handleSyncError
     );
     const unsubscribeEdges = onSnapshot(
-      collection(db,"users",user.uid,"edges"),
+      getUserEdgesCollection(activeBoardUserId, activeStorageBoardId),
       snapshot => {
         if (!active) return;
         setEdges(snapshot.docs.map(docSnapshot => docSnapshot.data()));
@@ -3499,16 +7322,92 @@ export default function App() {
       unsubscribeNodes();
       unsubscribeEdges();
     };
-  },[toast, user]);
+  },[
+    activeBoardUserId,
+    activeStorageBoardId,
+    activeWorkspaceBoardId,
+    boardDirectoryError,
+    boardDirectoryReady,
+    toast,
+    user,
+  ]);
 
   useEffect(()=>{
-    if(!flowRef.current||nodes.length===0) return;
+    if(
+      (route!==ROUTES.dashboard && route!==ROUTES.admin && route!==ROUTES.cycles) ||
+      !flowRef.current ||
+      nodes.length===0
+    ) return;
     const id=setTimeout(()=>fitGraph(), 80);
     return()=>clearTimeout(id);
-  },[nodes.length,edges.length,layoutDirection,search,statusFilter,fitGraph]);
+  },[edges.length,fitGraph,layoutDirection,nodes.length,route,search,statusFilter]);
+
+  useEffect(() => {
+    setSearch("");
+    setStatusFilter("all");
+    setParent("");
+    setChild("");
+    setTaskName("");
+    setEditTaskId("");
+    setEditTaskName("");
+    previousCircularSignature.current = "";
+  }, [activeBoardUserId, activeWorkspaceBoardId]);
+
+  useEffect(() => {
+    if (!user || !activeBoardUserId || !activeWorkspaceBoardId || !boardReady || boardError) {
+      return;
+    }
+
+    const profileIdentity = activeBoardUserId === user.uid
+      ? user
+      : {
+          uid: activeBoardUserId,
+          email: activeBoardProfileEmail,
+          displayName: activeBoardProfileName,
+        };
+
+    if (!profileIdentity?.uid) {
+      return;
+    }
+
+    const operations = [
+      setDoc(
+        doc(db, "users", activeBoardUserId),
+        buildAdminUserProfile(profileIdentity, nodes, edges),
+        { merge: true }
+      ),
+    ];
+
+    if (!usingLegacyBoardData) {
+      operations.unshift(
+        setDoc(
+          getUserBoardDoc(activeBoardUserId, activeWorkspaceBoardId),
+          buildBoardProfile({ name: activeBoardLabel }, nodes, edges),
+          { merge: true }
+        )
+      );
+    }
+
+    Promise.all(operations).catch(() => {});
+  }, [
+    activeBoardLabel,
+    activeBoardProfileEmail,
+    activeBoardProfileName,
+    activeBoardUserId,
+    activeWorkspaceBoardId,
+    boardError,
+    boardReady,
+    edges,
+    nodes,
+    usingLegacyBoardData,
+    user,
+  ]);
 
   useEffect(()=>{
-    if(!graphRef.current) return;
+    if(
+      (route!==ROUTES.dashboard && route!==ROUTES.admin && route!==ROUTES.cycles) ||
+      !graphRef.current
+    ) return;
     let frame;
     if(typeof ResizeObserver==="undefined"){
       const onResize=()=>fitGraph(250);
@@ -3521,7 +7420,7 @@ export default function App() {
     });
     ro.observe(graphRef.current);
     return()=>{cancelAnimationFrame(frame);ro.disconnect();};
-  },[fitGraph]);
+  },[fitGraph, route]);
 
   const buildNextTaskPosition = useCallback(() => {
     const positionedNodes = layoutNodes(nodes, edges, layoutDirection);
@@ -3547,22 +7446,62 @@ export default function App() {
     };
   }, [edges, layoutDirection, nodes]);
 
+  const createBoard = async () => {
+    if (!user || !activeBoardUserId || !boardDirectoryReady || boardDirectoryError) return;
+    if (usingLegacyBoardData) {
+      toast("Deploy the updated Firestore rules first to enable extra boards.", "warn");
+      return;
+    }
+
+    const nextBoardName = normalizeBoardName(newBoardName);
+    if (!nextBoardName) return;
+
+    if (sortedBoardProfiles.some(profile => profile.name.toLowerCase() === nextBoardName.toLowerCase())) {
+      toast("Board name already exists", "warn");
+      return;
+    }
+
+    const nextBoardId = `board-${Date.now()}`;
+
+    try {
+      await setDoc(
+        getUserBoardDoc(activeBoardUserId, nextBoardId),
+        buildBoardProfile({ name: nextBoardName })
+      );
+      setSelectedBoardId(nextBoardId);
+      setNewBoardName("");
+      setSearch("");
+      setStatusFilter("all");
+      setParent("");
+      setChild("");
+      setEditTaskId("");
+      setEditTaskName("");
+      toast(`Created "${nextBoardName}"`, "success");
+    } catch (error) {
+      toast("Could not create a new board right now. Please try again.", "error");
+    }
+  };
+
   // CRUD
   const deleteNode=async(nodeId,label)=>{
     if(!ensureBoardReady()) return;
     const ok=await confirm({icon:"🗑️",title:"Delete Task",
-      message:`Permanently delete "${label}" and all its dependency links?`,
+      message: activeBoardIsDelegated
+        ? `Permanently delete "${label}" from ${activeBoardOwnerLabel}'s ${activeBoardLabel} board and remove all linked dependencies?`
+        : `Permanently delete "${label}" and all its dependency links?`,
       danger:true,confirmLabel:"Delete Task"
     });
     if(!ok) return;
     try {
-      const[ns,es]=await Promise.all([
-        getDocs(collection(db,"users",user.uid,"nodes")),
-        getDocs(collection(db,"users",user.uid,"edges")),
+      const[,es]=await Promise.all([
+        getDocs(getUserNodesCollection(activeBoardUserId, activeStorageBoardId)),
+        getDocs(getUserEdgesCollection(activeBoardUserId, activeStorageBoardId)),
       ]);
       await Promise.all([
-        ...ns.docs.filter(d=>d.data().id===nodeId).map(d=>deleteDoc(doc(db,"users",user.uid,"nodes",d.id))),
-        ...es.docs.filter(d=>d.data().source===nodeId||d.data().target===nodeId).map(d=>deleteDoc(doc(db,"users",user.uid,"edges",d.id))),
+        deleteDoc(getUserNodeDoc(activeBoardUserId, nodeId, activeStorageBoardId)),
+        ...es.docs
+          .filter(d=>d.data().source===nodeId||d.data().target===nodeId)
+          .map(d=>deleteDoc(d.ref)),
       ]);
       toast(`"${label}" deleted`,"error");
     } catch (error) {
@@ -3575,9 +7514,10 @@ export default function App() {
     if(!taskName.trim()) return;
     const nextTaskName = taskName.trim();
     const nextPosition = buildNextTaskPosition();
+    const nextTaskId = Date.now().toString();
     try {
-      await addDoc(collection(db,"users",user.uid,"nodes"),{
-        id:Date.now().toString(),
+      await setDoc(getUserNodeDoc(activeBoardUserId, nextTaskId, activeStorageBoardId),{
+        id:nextTaskId,
         data:{label:nextTaskName,completed:false},
         position:nextPosition
       });
@@ -3602,14 +7542,10 @@ export default function App() {
     }
     
     try {
-      const ns = await getDocs(collection(db, "users", user.uid, "nodes"));
-      const d = ns.docs.find(x => x.data().id === editTaskId);
-      if (d) {
-        await updateDoc(doc(db, "users", user.uid, "nodes", d.id), {
-          "data.label": editTaskName.trim()
-        });
-        toast(`"${editTaskName.trim()}" updated`, "success");
-      }
+      await updateDoc(getUserNodeDoc(activeBoardUserId, editTaskId, activeStorageBoardId), {
+        "data.label": editTaskName.trim()
+      });
+      toast(`"${editTaskName.trim()}" updated`, "success");
     } catch (err) {
       console.error("Edit error:", err);
       toast("Failed to update task", "error");
@@ -3627,22 +7563,25 @@ export default function App() {
 
     let nextLayoutNodes = null;
     let nextLayoutEdges = null;
+    let createdEdgeId = "";
+    let createdCircularEdge = false;
 
     const localValidation = validateDependencyLink({
       sourceId,
       targetId,
       nodes,
       edges,
+      allowCycle: true,
     });
-    if(localValidation){
+    if(localValidation?.blocking){
       toast(localValidation.message, localValidation.type);
       return false;
     }
 
     try {
       const [nodeSnapshot, edgeSnapshot] = await Promise.all([
-        getDocs(collection(db,"users",user.uid,"nodes")),
-        getDocs(collection(db,"users",user.uid,"edges")),
+        getDocs(getUserNodesCollection(activeBoardUserId, activeStorageBoardId)),
+        getDocs(getUserEdgesCollection(activeBoardUserId, activeStorageBoardId)),
       ]);
       const currentNodes = nodeSnapshot.docs
         .map(snapshot => snapshot.data())
@@ -3656,8 +7595,9 @@ export default function App() {
         targetId,
         nodes: currentNodes,
         edges: currentEdges,
+        allowCycle: true,
       });
-      if(serverValidation){
+      if(serverValidation?.blocking){
         if(serverValidation.code === "missing-task"){
           const currentNodeIds = new Set(currentNodes.map(node => node.id));
           if(!currentNodeIds.has(parent)) setParent("");
@@ -3673,7 +7613,8 @@ export default function App() {
         target: targetId,
         animated: true,
       };
-      const edgeRef = doc(db, "users", user.uid, "edges", buildDependencyDocId(sourceId, targetId));
+      createdEdgeId = nextEdge.id;
+      const edgeRef = getUserEdgeDoc(activeBoardUserId, buildDependencyDocId(sourceId, targetId), activeStorageBoardId);
 
       await runTransaction(db, async transaction => {
         const existingEdge = await transaction.get(edgeRef);
@@ -3688,6 +7629,8 @@ export default function App() {
 
       nextLayoutEdges = [...currentEdges, nextEdge];
       nextLayoutNodes = computeAutoLayoutNodes(currentNodes, nextLayoutEdges, layoutDirection);
+      createdCircularEdge = getCircularDependencyGroups(nextLayoutNodes, nextLayoutEdges)
+        .some(group => group.edgeIds.includes(createdEdgeId));
 
       setNodes(currentNodesForView => mergeNodePositions(currentNodesForView, nextLayoutNodes));
       setEdges(currentEdgesForView => (
@@ -3714,7 +7657,11 @@ export default function App() {
       await persistNodePositions(nextLayoutNodes, { silent: true });
     }
 
-    toast("Tasks linked","success");
+    if (createdCircularEdge) {
+      toast("Circular dependency saved. Review it in Cycles or Details.", "warn");
+    } else {
+      toast("Tasks linked", "success");
+    }
     return true;
   };
 
@@ -3739,24 +7686,40 @@ export default function App() {
     setNodes(currentNodes => applyNodeChanges(changes, currentNodes));
   }, []);
 
-  const onNodeDragStart = useCallback(() => {
+  const onNodeDragStart = useCallback((_, node) => {
     if (clickTimer.current) {
       clearTimeout(clickTimer.current);
       clickTimer.current = null;
     }
-    suppressNodeClicksTemporarily(260);
-  }, [suppressNodeClicksTemporarily]);
+    dragMetaRef.current = {
+      id: node.id,
+      x: node.position?.x ?? 0,
+      y: node.position?.y ?? 0,
+    };
+  }, []);
 
   const onNodeDragStop = useCallback(async (_, node) => {
-    suppressNodeClicksTemporarily(260);
+    const dragMeta = dragMetaRef.current;
+    dragMetaRef.current = null;
+    const moved = Boolean(
+      dragMeta &&
+      dragMeta.id === node.id &&
+      (
+        Math.abs((node.position?.x ?? 0) - dragMeta.x) > 1 ||
+        Math.abs((node.position?.y ?? 0) - dragMeta.y) > 1
+      )
+    );
+
+    if (moved) {
+      suppressNodeClicksTemporarily(260);
+    }
 
     if (!ensureBoardReady()) return;
+    if (!moved) return;
 
     try {
-      const nodeSnapshot = await getDocs(collection(db,"users",user.uid,"nodes"));
-      const matchingNode = nodeSnapshot.docs.find(snapshot => snapshot.data().id === node.id);
-      if (matchingNode && hasFiniteNodePosition(node.position)) {
-        await updateDoc(matchingNode.ref, {
+      if (hasFiniteNodePosition(node.position)) {
+        await updateDoc(getUserNodeDoc(activeBoardUserId, node.id, activeStorageBoardId), {
           position: {
             x: node.position.x,
             y: node.position.y,
@@ -3766,7 +7729,7 @@ export default function App() {
     } catch (error) {
       toast("Could not save this task position right now. Please try again.", "error");
     }
-  }, [ensureBoardReady, suppressNodeClicksTemporarily, toast, user]);
+  }, [activeBoardUserId, activeStorageBoardId, ensureBoardReady, suppressNodeClicksTemporarily, toast]);
 
   const onConnectStart = useCallback(() => {
     if (clickTimer.current) {
@@ -3780,11 +7743,8 @@ export default function App() {
     suppressNodeClicksTemporarily(260);
   }, [suppressNodeClicksTemporarily]);
 
-  const onNodeClick=(event,node)=>{
+  const queueTaskToggle = useCallback((node) => {
     if (suppressNodeClickRef.current) {
-      return;
-    }
-    if (event?.target?.closest?.(".react-flow__handle")) {
       return;
     }
     if(!ensureBoardReady()) return;
@@ -3794,42 +7754,52 @@ export default function App() {
     }
     clickTimer.current=setTimeout(async()=>{
       try {
-        const ns=await getDocs(collection(db,"users",user.uid,"nodes"));
-        const d=ns.docs.find(x=>x.data().id===node.id);
-        if(d){
-          const was=d.data().data.completed;
-          const linked=hasLinkedDependency(node.id,edges);
-          if(!was&&!linked){
-            toast(formatUnlinkedTaskMessage(node.data.label),"warn");
-            clickTimer.current=null;
-            return;
-          }
-          const blockers=getBlockingTasks(node.id,edges,nodes);
-          if(!was&&blockers.length){
-            toast(formatBlockedTaskMessage(blockers),"warn");
-            clickTimer.current=null;
-            return;
-          }
-          await updateDoc(doc(db,"users",user.uid,"nodes",d.id),{"data.completed":!was});
-          toast(was?"Marked as pending":"Completed",was?"info":"success");
+        const was=node.data.completed;
+        const blockers=getBlockingTasks(node.id,edges,nodes);
+        if(!was&&blockers.length){
+          toast(formatBlockedTaskMessage(blockers),"warn");
+          clickTimer.current=null;
+          return;
         }
+        const {children} = getTaskDependencies(node.id, edges, nodes);
+        const ok = await confirm(buildTaskToggleConfirmation({
+          label: node.data.label,
+          wasCompleted: was,
+          dependentCount: children.length,
+        }));
+        if(!ok){
+          clickTimer.current=null;
+          return;
+        }
+        await updateDoc(getUserNodeDoc(activeBoardUserId, node.id, activeStorageBoardId),{"data.completed":!was});
+        toast(was?"Marked as pending":"Completed",was?"info":"success");
       } catch (error) {
         toast("Could not update this task right now. Please try again.", "error");
       }
       clickTimer.current=null;
     },260);
+  }, [activeBoardUserId, activeStorageBoardId, confirm, edges, ensureBoardReady, nodes, toast]);
+
+  const onNodeClick=(event,node)=>{
+    if (event?.target?.closest?.(".react-flow__handle")) {
+      return;
+    }
+    queueTaskToggle(node);
   };
 
   const onEdgeClick=async(_,edge)=>{
     if(!ensureBoardReady()) return;
     const ok=await confirm({icon:"🔗",title:"Remove Dependency",
-      message:"Remove this dependency link between the two tasks?",
+      message: activeBoardIsDelegated
+        ? `Remove this dependency link from ${activeBoardOwnerLabel}'s ${activeBoardLabel} board?`
+        : "Remove this dependency link between the two tasks?",
       danger:true,confirmLabel:"Remove"
     });
     if(!ok) return;
     try {
-      const es=await getDocs(collection(db,"users",user.uid,"edges"));
-      await Promise.all(es.docs.filter(d=>d.data().id===edge.id).map(d=>deleteDoc(doc(db,"users",user.uid,"edges",d.id))));
+      await deleteDoc(
+        getUserEdgeDoc(activeBoardUserId, buildDependencyDocId(edge.source, edge.target), activeStorageBoardId)
+      );
       toast("Dependency removed","info");
     } catch (error) {
       toast("Could not remove this dependency right now. Please try again.", "error");
@@ -3855,18 +7825,20 @@ export default function App() {
   const resetAll=async()=>{
     if(!ensureBoardReady()) return;
     const ok=await confirm({icon:"💥",title:"Reset Board",
-      message:"This will permanently delete ALL tasks and dependencies. This action cannot be undone.",
+      message: activeBoardIsDelegated
+        ? `This will permanently delete ALL tasks and dependencies from ${activeBoardOwnerLabel}'s ${activeBoardLabel} board. This action cannot be undone.`
+        : "This will permanently delete ALL tasks and dependencies from this board. This action cannot be undone.",
       danger:true,confirmLabel:"Reset Everything"
     });
     if(!ok) return;
     try {
       const[ns,es]=await Promise.all([
-        getDocs(collection(db,"users",user.uid,"nodes")),
-        getDocs(collection(db,"users",user.uid,"edges")),
+        getDocs(getUserNodesCollection(activeBoardUserId, activeStorageBoardId)),
+        getDocs(getUserEdgesCollection(activeBoardUserId, activeStorageBoardId)),
       ]);
       await Promise.all([
-        ...ns.docs.map(d=>deleteDoc(doc(db,"users",user.uid,"nodes",d.id))),
-        ...es.docs.map(d=>deleteDoc(doc(db,"users",user.uid,"edges",d.id))),
+        ...ns.docs.map(d=>deleteDoc(d.ref)),
+        ...es.docs.map(d=>deleteDoc(d.ref)),
       ]);
       toast("Board reset","error");
     } catch (error) {
@@ -3875,13 +7847,7 @@ export default function App() {
   };
 
   const commitBatchOperations = async operations => {
-    for (let start = 0; start < operations.length; start += FIRESTORE_BATCH_LIMIT) {
-      const batch = writeBatch(db);
-      operations
-        .slice(start, start + FIRESTORE_BATCH_LIMIT)
-        .forEach(applyOperation => applyOperation(batch));
-      await batch.commit();
-    }
+    await commitFirestoreOperations(operations);
   };
 
   const mergeNodePositions = useCallback((currentNodes, positionedNodes) => {
@@ -3903,18 +7869,14 @@ export default function App() {
   }, []);
 
   const persistNodePositions = useCallback(async (positionedNodes, { silent = false } = {}) => {
-    if (!user || !positionedNodes.length) return false;
+    if (!user || !activeBoardUserId || !positionedNodes.length) return false;
 
     try {
-      const nodeSnapshot = await getDocs(collection(db,"users",user.uid,"nodes"));
       const nodeRefById = new Map(
-        nodeSnapshot.docs
-          .map(snapshot => [snapshot.data()?.id, snapshot.ref])
-          .filter(([id]) => Boolean(id))
+        positionedNodes.map(node => [node.id, getUserNodeDoc(activeBoardUserId, node.id, activeStorageBoardId)])
       );
-
       const operations = positionedNodes
-        .filter(node => nodeRefById.has(node.id) && hasFiniteNodePosition(node.position))
+        .filter(node => hasFiniteNodePosition(node.position))
         .map(node => batch => batch.update(nodeRefById.get(node.id), {
           position: {
             x: node.position.x,
@@ -3932,7 +7894,7 @@ export default function App() {
       }
       return false;
     }
-  }, [toast, user]);
+  }, [activeBoardUserId, activeStorageBoardId, toast, user]);
 
   const applyLayoutDirection = useCallback(async nextDirection => {
     const normalizedDirection = VALID_LAYOUT_DIRECTIONS.has(nextDirection) ? nextDirection : "TB";
@@ -4015,13 +7977,18 @@ export default function App() {
       const importedBoard = parseBoardImportFile(await file.text());
       const nextTaskCount = importedBoard.nodes.length;
       const nextDependencyCount = importedBoard.edges.length;
+      const importedCircularGroups = getCircularDependencyGroups(importedBoard.nodes, importedBoard.edges);
+      const importedLoopCount = importedCircularGroups.length;
       const layoutMessage = importedBoard.layoutDirection
-        ? " The saved canvas layout from this file will also be applied."
+        ? " The saved board layout from this file will also be applied."
+        : "";
+      const cycleMessage = importedLoopCount
+        ? ` ${importedLoopCount} circular dependenc${importedLoopCount===1 ? "y is" : "ies are"} included and will be highlighted in Cycles and Details.`
         : "";
       const ok = await confirm({
         icon: "📥",
         title: "Import Board",
-        message: `Import "${file.name}" with ${nextTaskCount} task${nextTaskCount===1?"":"s"} and ${nextDependencyCount} dependenc${nextDependencyCount===1?"y":"ies"}? This will replace your current board.${layoutMessage}`,
+        message: `Import "${file.name}" with ${nextTaskCount} task${nextTaskCount===1?"":"s"} and ${nextDependencyCount} dependenc${nextDependencyCount===1?"y":"ies"}? This will replace your current board.${layoutMessage}${cycleMessage}`,
         danger: nodes.length > 0 || edges.length > 0,
         confirmLabel: "Import and Replace",
       });
@@ -4029,19 +7996,19 @@ export default function App() {
       if (!ok) return;
 
       const [nodeSnapshot, edgeSnapshot] = await Promise.all([
-        getDocs(collection(db,"users",user.uid,"nodes")),
-        getDocs(collection(db,"users",user.uid,"edges")),
+        getDocs(getUserNodesCollection(activeBoardUserId, activeStorageBoardId)),
+        getDocs(getUserEdgesCollection(activeBoardUserId, activeStorageBoardId)),
       ]);
 
       const operations = [
         ...edgeSnapshot.docs.map(snapshot => batch => batch.delete(snapshot.ref)),
         ...nodeSnapshot.docs.map(snapshot => batch => batch.delete(snapshot.ref)),
         ...importedBoard.nodes.map(node => {
-          const nodeRef = doc(collection(db,"users",user.uid,"nodes"));
+          const nodeRef = getUserNodeDoc(activeBoardUserId, node.id, activeStorageBoardId);
           return batch => batch.set(nodeRef, node);
         }),
         ...importedBoard.edges.map(edge => {
-          const edgeRef = doc(db,"users",user.uid,"edges",buildDependencyDocId(edge.source, edge.target));
+          const edgeRef = getUserEdgeDoc(activeBoardUserId, buildDependencyDocId(edge.source, edge.target), activeStorageBoardId);
           return batch => batch.set(edgeRef, edge);
         }),
       ];
@@ -4059,7 +8026,14 @@ export default function App() {
       setSearch("");
       setStatusFilter("all");
 
-      toast(`Imported ${nextTaskCount} task${nextTaskCount===1?"":"s"} and ${nextDependencyCount} dependenc${nextDependencyCount===1?"y":"ies"} from "${file.name}".`, "success");
+      if (importedLoopCount) {
+        toast(
+          `Imported ${nextTaskCount} task${nextTaskCount===1?"":"s"} with ${importedLoopCount} circular dependenc${importedLoopCount===1?"y":"ies"}. Review them in Cycles or Details.`,
+          "warn"
+        );
+      } else {
+        toast(`Imported ${nextTaskCount} task${nextTaskCount===1?"":"s"} and ${nextDependencyCount} dependenc${nextDependencyCount===1?"y":"ies"} from "${file.name}".`, "success");
+      }
     } catch (error) {
       toast(error?.message || "Could not import that board file. Please try again.", "error");
     } finally {
@@ -4068,54 +8042,107 @@ export default function App() {
   };
 
   // Stats
-  const statusSummary = getTaskStatusSummary(nodes, edges);
-  const total=statusSummary.total;
-  const done=statusSummary.completed;
-  const pending=statusSummary.pending;
-  const blocked=statusSummary.blocked;
-  const ready=statusSummary.ready;
-  const unlinked=statusSummary.unlinked;
-  const boardSyncActive = !!user && boardReady && !boardError;
+  const boardSummary = buildAdminBoardSummary(nodes, edges);
+  const total=boardSummary.taskCount;
+  const done=boardSummary.completedCount;
+  const pending=boardSummary.pendingCount;
+  const blocked=boardSummary.blockedCount;
+  const ready=boardSummary.readyCount;
+  const unlinked=boardSummary.unlinkedCount;
+  const boardSyncActive = !!user && !!activeBoardUserId && !!activeWorkspaceBoardId && boardDirectoryReady && !boardDirectoryError && boardReady && !boardError;
+  const nodesById = new Map(nodes.map(node => [node.id, node]));
+  const taskOptions=[...nodes].sort((a,b)=>
+    a.data.label.localeCompare(b.data.label, undefined, {sensitivity:"base", numeric:true})
+  );
+  const circularDependencyGroups = getCircularDependencyGroups(nodes, edges);
+  const circularNodeIdSet = new Set(circularDependencyGroups.flatMap(group => group.nodeIds));
+  const circularEdgeIdSet = new Set(circularDependencyGroups.flatMap(group => group.edgeIds));
+  const circularTaskCount = circularNodeIdSet.size;
+  const loopLabelByTaskId = new Map();
+  const circularSummaryByTaskId = new Map();
+  const circularDependencyDisplayGroups = circularDependencyGroups.map((group, index) => {
+    const label = `Loop ${index + 1}`;
+    const summary = group.nodeIds
+      .map(nodeId => nodesById.get(nodeId)?.data?.label || nodeId)
+      .sort((left, right) => left.localeCompare(right, undefined, {sensitivity:"base", numeric:true}))
+      .join(", ");
+
+    group.nodeIds.forEach(nodeId => {
+      loopLabelByTaskId.set(nodeId, label);
+      circularSummaryByTaskId.set(
+        nodeId,
+        `${label}: ${summary}. Remove one dependency link to resolve it.`
+      );
+    });
+
+    return {
+      ...group,
+      label,
+      summary,
+    };
+  });
   const taskFilterOptions = [
     { value: "all", label: "All tasks", count: total },
     { value: "open", label: "Open / Ready", count: ready },
     { value: "blocked", label: "Blocked", count: blocked },
     { value: "complete", label: "Completed", count: done },
     { value: "unlinked", label: "Needs dependency", count: unlinked },
+    { value: "cycle", label: "Circular", count: circularTaskCount },
   ];
   const activeTaskFilterLabel =
     taskFilterOptions.find(option => option.value === statusFilter)?.label || "All tasks";
   const filteredNodes = nodes.filter(node =>
-    matchesTaskSearch(node, search) && matchesTaskViewFilter(node, edges, nodes, statusFilter)
+    matchesTaskSearch(node, search) &&
+    matchesTaskViewFilter(node, edges, nodes, statusFilter, circularNodeIdSet)
   );
   const filteredNodeIds = new Set(filteredNodes.map(node => node.id));
   const filteredEdges = edges.filter(edge =>
-    filteredNodeIds.has(edge.source) && filteredNodeIds.has(edge.target)
+    filteredNodeIds.has(edge.source) &&
+    filteredNodeIds.has(edge.target) &&
+    (statusFilter !== "cycle" || circularEdgeIdSet.has(edge.id || buildDependencyEdgeId(edge.source, edge.target)))
   );
   const visibleTaskCount = filteredNodes.length;
   const hasActiveTaskFilters = Boolean(search.trim()) || statusFilter !== "all";
+  const adminSelectionEmptyState = adminModeActive && !activeBoardUserId;
   const showFilteredEmptyState = boardReady && total > 0 && visibleTaskCount === 0;
-  const showEmptyState = !boardReady || total===0 || showFilteredEmptyState;
-  const emptyStateIcon = boardError ? "!" : !boardReady ? "..." : "◈";
+  const showEmptyState = adminSelectionEmptyState || !boardReady || total===0 || showFilteredEmptyState;
+  const emptyStateIcon = adminSelectionEmptyState ? "◎" : boardError ? "!" : !boardReady ? "..." : "◈";
   const emptyStateTitle = boardError
     ? "Cloud sync unavailable"
+    : adminSelectionEmptyState
+      ? "Select a user board"
     : !boardReady
       ? "Syncing your workspace"
       : showFilteredEmptyState
         ? "No matching tasks"
-      : "No tasks yet";
+      : activeBoardIsDelegated
+        ? "No tasks for this user yet"
+        : "No tasks yet";
   const emptyStateSubtitle = boardError
-    ? "We couldn't load your saved tasks from Firestore. Refresh and check your Firebase access."
+    ? (
+        activeBoardIsDelegated
+          ? `We couldn't load ${activeBoardOwnerLabel}'s ${activeBoardLabel} board from Firestore. Refresh and check your Firebase access.`
+          : `We couldn't load ${activeBoardLabel} from Firestore. Refresh and check your Firebase access.`
+      )
+    : adminSelectionEmptyState
+      ? (adminDirectoryError || "Choose a user from the admin panel to inspect their task graph and take action.")
     : !boardReady
-      ? "Loading your saved tasks and dependencies from Firestore..."
+      ? (
+          activeBoardIsDelegated
+            ? `Loading ${activeBoardOwnerLabel}'s ${activeBoardLabel} board...`
+            : `Loading ${activeBoardLabel}...`
+        )
       : showFilteredEmptyState
         ? buildTaskFilterEmptyMessage(search, activeTaskFilterLabel, statusFilter !== "all")
-      : "Add your first task from the panel on the left";
+      : activeBoardIsDelegated
+        ? `No tasks in ${activeBoardOwnerLabel}'s ${activeBoardLabel} board yet.`
+        : `Add your first task to ${activeBoardLabel}.`;
   const pct=total>0?Math.round((done/total)*100):0;
   const statusColors={
     complete: dark?"#10b981":"#059669",
     pending:  dark?"#f59e0b":"#d97706",
     blocked:  dark?"#ef4444":"#dc2626",
+    cycle:    dark?"#f97316":"#ea580c",
   };
   const statusLegend=[
     {
@@ -4136,14 +8163,89 @@ export default function App() {
       count:blocked,
       className:"tg-status-blocked",
     },
-  ];
-  const taskOptions=[...nodes].sort((a,b)=>
-    a.data.label.localeCompare(b.data.label, undefined, {sensitivity:"base", numeric:true})
+    circularTaskCount > 0
+      ? {
+          key:"cycle",
+          label:"In loop",
+          count:circularTaskCount,
+          className:"tg-status-cycle",
+        }
+      : null,
+  ].filter(Boolean);
+  const taskRecords = taskOptions.map(node => {
+    const status = getTaskWorkflowStatus(node, edges, nodes);
+    const blockers = getBlockingTasks(node.id, edges, nodes);
+    const {parents, children} = getTaskDependencies(node.id, edges, nodes);
+    const isCircular = circularNodeIdSet.has(node.id);
+
+    return {
+      node,
+      status,
+      statusText: getTaskStatusLabel(status),
+      blockedSummary: status === "blocked" ? formatBlockedTaskSummary(blockers) : null,
+      blockers,
+      parents,
+      children,
+      isCircular,
+      loopLabel: loopLabelByTaskId.get(node.id) || "",
+      circularSummary: circularSummaryByTaskId.get(node.id) || null,
+    };
+  });
+  const taskRecordById = new Map(taskRecords.map(record => [record.node.id, record]));
+  const filteredTaskRecords = taskRecords.filter(record =>
+    matchesTaskSearch(record.node, search) &&
+    matchesTaskViewFilter(record.node, edges, nodes, statusFilter, circularNodeIdSet)
   );
+  const circularTaskRecords = taskRecords.filter(record => record.isCircular);
+  const circularLoopRecords = circularDependencyDisplayGroups.map(group => ({
+    ...group,
+    nodes: group.nodeIds
+      .map(nodeId => nodesById.get(nodeId))
+      .filter(Boolean),
+  }));
+  const circularCompletedCount = circularTaskRecords.filter(record => record.status === "complete").length;
+  const circularBlockedCount = circularTaskRecords.filter(record => record.status === "blocked").length;
+  const circularOpenCount = circularTaskRecords.filter(record =>
+    record.status === "ready" || record.status === "unlinked"
+  ).length;
+  const circularStatusLegend = [
+    {
+      key:"cycle",
+      label:"In loop",
+      count:circularTaskCount,
+      className:"tg-status-cycle",
+    },
+    circularCompletedCount > 0
+      ? {
+          key:"cycle-complete",
+          label:"Completed",
+          count:circularCompletedCount,
+          className:"tg-status-complete",
+        }
+      : null,
+    circularBlockedCount > 0
+      ? {
+          key:"cycle-blocked",
+          label:"Blocked",
+          count:circularBlockedCount,
+          className:"tg-status-blocked",
+        }
+      : null,
+    circularOpenCount > 0
+      ? {
+          key:"cycle-open",
+          label:"Open / Ready",
+          count:circularOpenCount,
+          className:"tg-status-pending",
+        }
+      : null,
+  ].filter(Boolean);
+  const blockedTaskRecords = taskRecords.filter(record => record.status === "blocked");
   const selectedParent=nodes.find(n=>n.id===parent);
   const selectedChild=nodes.find(n=>n.id===child);
   const canvasLocked=!canvasInteractive;
   const currentLayout = getLayoutConfig(layoutDirection);
+  const layoutLabel = LAYOUT_OPTIONS.find(option => option.value === layoutDirection)?.shortLabel || layoutDirection;
   const dependencyEdgeTheme=dark
     ? {
         lineStroke:"rgba(125,211,252,0.56)",
@@ -4157,25 +8259,90 @@ export default function App() {
         haloStroke:"rgba(99,102,241,0.12)",
         arrowStroke:"rgba(51,65,85,0.72)",
       };
+  const cycleDependencyEdgeTheme=dark
+    ? {
+        lineStroke:"rgba(251,146,60,0.74)",
+        flowStroke:"rgba(255,237,213,0.96)",
+        haloStroke:"rgba(249,115,22,0.2)",
+        arrowStroke:"rgba(254,215,170,0.98)",
+      }
+    : {
+        lineStroke:"rgba(234,88,12,0.68)",
+        flowStroke:"rgba(194,65,12,0.9)",
+        haloStroke:"rgba(249,115,22,0.16)",
+        arrowStroke:"rgba(124,45,18,0.82)",
+      };
   const miniMapMaskColor = dark ? "rgba(2,6,23,0.48)" : "rgba(238,242,255,0.65)";
   const miniMapMaskStrokeColor = dark ? "rgba(103,232,249,0.68)" : "rgba(99,102,241,0.18)";
   const miniMapMaskStrokeWidth = dark ? 2 : 1.4;
+  const buildRenderedEdges = sourceEdges => {
+    const directedEdgeKeys = new Set(
+      sourceEdges.map(edge => buildDependencyEdgeId(edge.source, edge.target))
+    );
 
-  // Styled nodes
-  const styledNodes=layoutNodes(filteredNodes,filteredEdges,layoutDirection)
-    .map(n=>{
+    return sourceEdges.map(edge => {
+      const edgeId = edge.id || buildDependencyEdgeId(edge.source, edge.target);
+      const isCircularEdge = circularEdgeIdSet.has(edgeId);
+      const edgeTheme = isCircularEdge ? cycleDependencyEdgeTheme : dependencyEdgeTheme;
+      const hasReverseEdge =
+        edge.source !== edge.target &&
+        directedEdgeKeys.has(buildDependencyEdgeId(edge.target, edge.source));
+      const routeOffset = hasReverseEdge
+        ? (
+            String(edge.source).localeCompare(String(edge.target), undefined, {
+              sensitivity: "base",
+              numeric: true,
+            }) <= 0
+              ? 28
+              : -28
+          )
+        : 0;
+
+      return {
+        ...edge,
+        id: edgeId,
+        type:"dependency",
+        animated:true,
+        className:`tg-dependency-edge ${isCircularEdge ? "tg-dependency-edge--cycle" : ""}`.trim(),
+        interactionWidth:26,
+        data:{
+          ...edgeTheme,
+          isCircularEdge,
+          routeOffset,
+        },
+        style:{
+          stroke:edgeTheme.lineStroke,
+          strokeWidth:isCircularEdge ? 3 : 2.6,
+        },
+      };
+    });
+  };
+
+  const buildStyledFlowNodes = (
+    sourceNodes,
+    sourceEdges,
+    {interactive = true, forceAutoLayout = false} = {}
+  ) =>
+    (forceAutoLayout
+      ? computeAutoLayoutNodes(sourceNodes, sourceEdges, layoutDirection)
+      : layoutNodes(sourceNodes, sourceEdges, layoutDirection)
+    ).map(n=>{
+      const taskRecord = taskRecordById.get(n.id);
       const blockers=getBlockingTasks(n.id,edges,nodes);
-      const status = getTaskWorkflowStatus(n, edges, nodes);
+      const status = taskRecord?.status || getTaskWorkflowStatus(n, edges, nodes);
       const d=status==="complete", b=status==="blocked", linked=status!=="unlinked"&&status!=="unknown";
+      const isCircular = taskRecord?.isCircular || false;
+      const loopLabel = taskRecord?.loopLabel || "";
       const match=Boolean(search.trim())&&matchesTaskSearch(n, search);
       const {parents, children} = getTaskDependencies(n.id, edges, nodes);
-      const blockedSummary = !d && b ? formatBlockedTaskSummary(blockers) : null;
+      const blockedSummary = taskRecord?.blockedSummary || (!d && b ? formatBlockedTaskSummary(blockers) : null);
+      const circularSummary = taskRecord?.circularSummary || null;
       const mapDependency = item => ({
         id: item.id,
         label: item.data.label,
         completed: item.data.completed,
       });
-      const statusText = d ? "Completed" : !linked ? "Needs dependency" : b ? "Blocked" : "Ready";
+      const statusText = taskRecord?.statusText || (d ? "Completed" : !linked ? "Needs dependency" : b ? "Blocked" : "Ready");
       const dependencyList = (items, emptyText) =>
         items.length ? items.map(item=>item.data.label).join(", ") : emptyText;
       let bg,border,color,shadow;
@@ -4192,6 +8359,10 @@ export default function App() {
         border="1.5px solid var(--status-pending)";
         color="var(--status-pending)";shadow="0 16px 38px rgba(245,158,11,0.16)";
       }
+      if(isCircular){
+        bg=`linear-gradient(135deg, color-mix(in srgb, var(--status-cycle) 10%, transparent), transparent 62%), ${bg}`;
+        shadow=`${shadow}, 0 0 0 1px color-mix(in srgb, var(--status-cycle) 14%, transparent), 0 20px 36px rgba(249,115,22,0.16)`;
+      }
       if(match) border="2px solid #facc15";
       return {...n,
         type:"task",
@@ -4200,15 +8371,19 @@ export default function App() {
           status,
           statusText,
           blockedSummary,
+          circularSummary,
+          isCircular,
+          loopLabel,
           parents: parents.map(mapDependency),
           children: children.map(mapDependency),
-          onRequestDelete: () => {
+          onRequestToggle: interactive ? () => queueTaskToggle(n) : undefined,
+          onRequestDelete: interactive ? () => {
             if (clickTimer.current) {
               clearTimeout(clickTimer.current);
               clickTimer.current = null;
             }
             deleteNode(n.id, n.data.label);
-          },
+          } : undefined,
           positionSyncKey: `${Math.round(n.position?.x ?? 0)}:${Math.round(n.position?.y ?? 0)}`,
           sourceHandlePosition: n.sourcePosition || currentLayout.sourcePosition,
           targetHandlePosition: n.targetPosition || currentLayout.targetPosition,
@@ -4228,13 +8403,14 @@ export default function App() {
           accessibleLabel: [
             n.data.label,
             statusText,
+            circularSummary,
             blockedSummary,
             `Depends on: ${dependencyList(parents, "none")}`,
             `Required by: ${dependencyList(children, "none")}`,
           ].filter(Boolean).join(". "),
         },
         style:{
-          cursor:"pointer",
+          cursor:interactive ? "pointer" : "default",
           transition:"all 0.25s ease",
           width:`${NW}px`,
           height:`${NH}px`,
@@ -4244,10 +8420,109 @@ export default function App() {
         }
       };
     });
+  const styledNodes = buildStyledFlowNodes(filteredNodes, filteredEdges, { interactive: true });
+  const overviewStyledNodes = buildStyledFlowNodes(nodes, edges, {
+    interactive: false,
+    forceAutoLayout: true,
+  });
+  const circularNodes = nodes.filter(node => circularNodeIdSet.has(node.id));
+  const circularEdges = edges.filter(edge =>
+    circularEdgeIdSet.has(edge.id || buildDependencyEdgeId(edge.source, edge.target))
+  );
+  const circularStyledNodes = buildStyledFlowNodes(circularNodes, circularEdges, { interactive: true });
+  const renderedFilteredEdges = buildRenderedEdges(filteredEdges);
+  const renderedOverviewEdges = buildRenderedEdges(edges);
+  const renderedCircularEdges = buildRenderedEdges(circularEdges);
+  const circularSignature = circularDependencyDisplayGroups
+    .map(group => `${group.label}:${group.summary}`)
+    .join("|");
+
+  useEffect(() => {
+    if (!circularSignature) {
+      previousCircularSignature.current = "";
+      return;
+    }
+
+    if (!boardReady || boardError) {
+      return;
+    }
+
+    if (previousCircularSignature.current === circularSignature) {
+      return;
+    }
+
+    previousCircularSignature.current = circularSignature;
+    toast(
+      `Detected ${circularDependencyDisplayGroups.length} circular dependenc${circularDependencyDisplayGroups.length===1?"y":"ies"}. Use the Circular filter to inspect them.`,
+      "warn"
+    );
+  }, [boardError, boardReady, circularDependencyDisplayGroups.length, circularSignature, toast]);
+
+  const reviewCircularDependencies = (nextRoute = route) => {
+    setSearch("");
+    setStatusFilter("cycle");
+    if (nextRoute !== route) {
+      navigate(nextRoute);
+      return;
+    }
+
+    focusVisibleGraph();
+  };
+
+  const reviewBlockedTasks = (nextRoute = route) => {
+    setSearch("");
+    setStatusFilter("blocked");
+    if (nextRoute !== route) {
+      navigate(nextRoute);
+      return;
+    }
+
+    focusVisibleGraph();
+  };
+
+  const primaryWorkspaceRoute = isAdmin ? ROUTES.admin : ROUTES.dashboard;
+
+  const resetTaskFilters = () => {
+    setSearch("");
+    setStatusFilter("all");
+    if (route === ROUTES.cycles) {
+      navigate(primaryWorkspaceRoute);
+    }
+  };
+
+  const showTaskOnGraph = (
+    node,
+    nextRoute = (route === ROUTES.admin || route === ROUTES.details) && isAdmin
+      ? ROUTES.admin
+      : ROUTES.dashboard
+  ) => {
+    if (!node) return;
+    setSearch(node.data.label);
+    setStatusFilter(circularNodeIdSet.has(node.id) ? "cycle" : "all");
+    if (nextRoute !== route) {
+      navigate(nextRoute);
+      return;
+    }
+
+    focusVisibleGraph();
+  };
 
   const tc=dark?"tgd":"tgl";
   const userDisplayName = formatUserDisplayName(user);
   const userInitial = getUserInitial(user);
+  const workspaceTabCount = isAdmin ? 5 : 4;
+  const workspaceTabColumns = isMobileViewport ? 2 : (workspaceTabCount > 3 ? 2 : workspaceTabCount);
+  const canResetTaskFilters = Boolean(search.trim()) || statusFilter !== "all" || route === ROUTES.cycles;
+  const cycleCreationEnabled = true;
+  const pendingDependencyValidation = parent && child
+    ? validateDependencyLink({
+        sourceId: parent,
+        targetId: child,
+        nodes,
+        edges,
+        allowCycle: cycleCreationEnabled,
+      })
+    : null;
   const panelToggleLabel = isMobileViewport
     ? (panelCollapsed ? "Show tools" : "Hide tools")
     : (panelCollapsed ? "Expand sidebar" : "Collapse sidebar");
@@ -4258,6 +8533,136 @@ export default function App() {
   const graphFitPadding = isCompactViewport
     ? CANVAS_VIEWPORT.fitPadding.compact
     : CANVAS_VIEWPORT.fitPadding.desktop;
+  const showCycleGraphEmptyState = boardError || !boardReady || circularTaskCount === 0;
+  const cycleGraphEmptyIcon = boardError ? "!" : !boardReady ? "..." : "◎";
+  const cycleGraphEmptyTitle = boardError
+    ? emptyStateTitle
+    : !boardReady
+      ? emptyStateTitle
+      : "No circular dependencies";
+  const cycleGraphEmptySubtitle = boardError
+    ? emptyStateSubtitle
+    : !boardReady
+      ? emptyStateSubtitle
+      : "This focused chart will show only the tasks and dependency edges that participate in a circular loop.";
+
+  const buildGraphWorkspace = ({
+    workspaceKey,
+    graphNodes,
+    graphEdges,
+    legendItems,
+    legendTitle = "Task Status",
+    legendTotalLabel = `${total} total`,
+    shouldShowEmptyState = false,
+    graphEmptyIcon = emptyStateIcon,
+    graphEmptyTitle = emptyStateTitle,
+    graphEmptySubtitle = emptyStateSubtitle,
+  }) => (
+    <div className={`tg-graph ${canvasLocked ? "tg-graph--locked" : ""}`} ref={graphRef}>
+      <div className="tg-graph-aura tg-graph-aura--one"/>
+      <div className="tg-graph-aura tg-graph-aura--two"/>
+      <div className="tg-graph-aura tg-graph-aura--three"/>
+      <div className="tg-graph-grid"/>
+      <BgCanvas dark={dark}/>
+      <div className="tg-graph-legend" aria-label="Task status color key">
+        <div className="tg-graph-legend-head">
+          <div className="tg-graph-legend-title">{legendTitle}</div>
+          <div className="tg-graph-legend-total">{legendTotalLabel}</div>
+        </div>
+        <div className="tg-graph-legend-items">
+          {legendItems.map(s=>(
+            <div className={`tg-graph-legend-item ${s.className}`} key={s.key}>
+              <span className="tg-dot"/>
+              <span>{s.label}</span>
+              <span className="tg-graph-legend-count">{s.count}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      {shouldShowEmptyState&&(
+        <div className="tg-empty">
+          <div className="tg-empty-icon">{graphEmptyIcon}</div>
+          <div className="tg-empty-t">{graphEmptyTitle}</div>
+          <div className="tg-empty-s">{graphEmptySubtitle}</div>
+        </div>
+      )}
+      <ReactFlow
+        key={`flow-${workspaceKey}-${layoutDirection}-${activeBoardUserId || "none"}-${activeWorkspaceBoardId || "no-board"}`}
+        nodes={graphNodes}
+        nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
+        edges={graphEdges}
+        onNodeClick={onNodeClick}
+        onNodesChange={onNodesChange}
+        onNodeDragStart={onNodeDragStart}
+        onNodeDragStop={onNodeDragStop}
+        onEdgeClick={onEdgeClick}
+        onConnect={onConnect}
+        onConnectStart={onConnectStart}
+        onConnectEnd={onConnectEnd}
+        onInit={instance=>{flowRef.current=instance;setTimeout(()=>fitGraph(350),0);}}
+        fitView
+        fitViewOptions={{padding:graphFitPadding}}
+        connectionLineComponent={DependencyConnectionLine}
+        minZoom={CANVAS_VIEWPORT.minZoom}
+        maxZoom={CANVAS_VIEWPORT.maxZoom}
+        nodesDraggable={canvasInteractive}
+        nodesConnectable={canvasInteractive}
+        elementsSelectable={canvasInteractive}
+        panOnDrag={canvasInteractive}
+        zoomOnScroll={canvasInteractive}
+        zoomOnPinch={canvasInteractive}
+        zoomOnDoubleClick={false}
+        connectOnClick={false}
+        onlyRenderVisibleElements
+        proOptions={{hideAttribution:true}}
+      >
+        <MiniMap
+          nodeColor={n=>
+            n.data?.isCircular
+              ? statusColors.cycle
+              : n.data?.completed
+                ? statusColors.complete
+                : isBlocked(n.id,edges,nodes)
+                  ? statusColors.blocked
+                  : statusColors.pending
+          }
+          maskColor={miniMapMaskColor}
+          maskStrokeColor={miniMapMaskStrokeColor}
+          maskStrokeWidth={miniMapMaskStrokeWidth}
+        />
+        <Controls onInteractiveChange={setCanvasInteractive}/>
+        <Background color={dark?"rgba(0,212,255,0.08)":"rgba(148,163,184,0.18)"} gap={176} size={1.15}/>
+      </ReactFlow>
+    </div>
+  );
+
+  const graphWorkspace = buildGraphWorkspace({
+    workspaceKey: "main",
+    graphNodes: styledNodes,
+    graphEdges: renderedFilteredEdges,
+    legendItems: statusLegend,
+    legendTitle: "Task Status",
+    legendTotalLabel: `${total} total`,
+    shouldShowEmptyState: showEmptyState,
+  });
+  const cycleGraphWorkspace = buildGraphWorkspace({
+    workspaceKey: "cycle",
+    graphNodes: circularStyledNodes,
+    graphEdges: renderedCircularEdges,
+    legendItems: circularStatusLegend.length ? circularStatusLegend : [{
+      key: "cycle",
+      label: "In loop",
+      count: 0,
+      className: "tg-status-cycle",
+    }],
+    legendTitle: "Circular Chart",
+    legendTotalLabel: `${circularTaskCount} task${circularTaskCount===1 ? "" : "s"} in loops`,
+    shouldShowEmptyState: showCycleGraphEmptyState,
+    graphEmptyIcon: cycleGraphEmptyIcon,
+    graphEmptyTitle: cycleGraphEmptyTitle,
+    graphEmptySubtitle: cycleGraphEmptySubtitle,
+  });
 
   /* ══ ROUTING ══ */
   if(route===ROUTES.landing) {
@@ -4272,6 +8677,14 @@ export default function App() {
   }
 
   if(!authReady) {
+    return <RouteBootScreen dark={dark} />;
+  }
+
+  if(route===ROUTES.admin && user && !adminReady) {
+    return <RouteBootScreen dark={dark} />;
+  }
+
+  if(route===ROUTES.admin && user && adminReady && !isAdmin) {
     return <RouteBootScreen dark={dark} />;
   }
 
@@ -4315,7 +8728,7 @@ export default function App() {
     return (
       <Profile
         user={user}
-        onBack={()=>navigate(ROUTES.dashboard)}
+        onBack={()=>navigate(lastWorkspaceRoute.current || ROUTES.dashboard)}
         onProfileUpdated={u=>setUser(toAppUser(u))}
         darkTheme={dark}
         setDarkTheme={setDark}
@@ -4417,8 +8830,186 @@ export default function App() {
           </div>
         )}
 
+        <div
+          className="tg-route-switch"
+          role="navigation"
+          aria-label="Workspace pages"
+          style={!panelCollapsed ? { gridTemplateColumns: `repeat(${workspaceTabColumns}, minmax(0, 1fr))` } : undefined}
+        >
+          <button
+            type="button"
+            className={`tg-route-tab ${route===ROUTES.dashboard ? "tg-route-tab--active" : ""}`}
+            onClick={()=>navigate(ROUTES.dashboard)}
+            aria-pressed={route===ROUTES.dashboard}
+          >
+            <span className="tg-route-tab-icon">◈</span>
+            <span className="tg-route-tab-copy">
+              <span className="tg-route-tab-title">Graph</span>
+              <span className="tg-route-tab-note">Flow view</span>
+            </span>
+          </button>
+          <button
+            type="button"
+            className={`tg-route-tab ${route===ROUTES.tasks ? "tg-route-tab--active" : ""}`}
+            onClick={()=>navigate(ROUTES.tasks)}
+            aria-pressed={route===ROUTES.tasks}
+          >
+            <span className="tg-route-tab-icon">☰</span>
+            <span className="tg-route-tab-copy">
+              <span className="tg-route-tab-title">Tasks</span>
+              <span className="tg-route-tab-note">List view</span>
+            </span>
+          </button>
+          <button
+            type="button"
+            className={`tg-route-tab ${route===ROUTES.details ? "tg-route-tab--active" : ""}`}
+            onClick={()=>navigate(ROUTES.details)}
+            aria-pressed={route===ROUTES.details}
+          >
+            <span className="tg-route-tab-icon">⊞</span>
+            <span className="tg-route-tab-copy">
+              <span className="tg-route-tab-title">Details</span>
+              <span className="tg-route-tab-note">Deep view</span>
+            </span>
+          </button>
+          <button
+            type="button"
+            className={`tg-route-tab ${route===ROUTES.cycles ? "tg-route-tab--active" : ""}`}
+            onClick={()=>navigate(ROUTES.cycles)}
+            aria-pressed={route===ROUTES.cycles}
+          >
+            <span className="tg-route-tab-icon">↺</span>
+            <span className="tg-route-tab-copy">
+              <span className="tg-route-tab-title">Cycles</span>
+              <span className="tg-route-tab-note">Loop view</span>
+            </span>
+          </button>
+          {isAdmin && (
+            <button
+              type="button"
+              className={`tg-route-tab ${route===ROUTES.admin ? "tg-route-tab--active" : ""}`}
+              onClick={()=>navigate(ROUTES.admin)}
+              aria-pressed={route===ROUTES.admin}
+            >
+              <span className="tg-route-tab-icon">⚙</span>
+              <span className="tg-route-tab-copy">
+                <span className="tg-route-tab-title">Admin</span>
+                <span className="tg-route-tab-note">Control view</span>
+              </span>
+            </button>
+          )}
+        </div>
+
         {/* Body */}
         <div className="tg-panel-body" id="tg-panel-body">
+
+          {isAdmin && (route===ROUTES.admin || route===ROUTES.cycles || route===ROUTES.details) && (
+            <div className="tg-section">
+              <div className="tg-sec-label">Admin Focus</div>
+              <input
+                className="tg-input"
+                type="text"
+                placeholder="Search user or email…"
+                value={adminUserSearch}
+                onChange={e=>setAdminUserSearch(e.target.value)}
+              />
+              <div className="tg-field-stack">
+                <label className="tg-field-label" htmlFor="tg-admin-user-select">
+                  Controlled board
+                  <span className="tg-field-hint">All actions below apply here</span>
+                </label>
+                <div className="tg-select-wrap">
+                  <select
+                    id="tg-admin-user-select"
+                    className="tg-select"
+                    value={adminSelectedUserId}
+                    onChange={e=>setAdminSelectedUserId(e.target.value)}
+                  >
+                    <option value="">
+                      {filteredAdminProfiles.length ? "Select a user board..." : "No users found"}
+                    </option>
+                    {filteredAdminProfiles.map(profile=>(
+                      <option key={profile.uid} value={profile.uid}>
+                        {formatUserDisplayName(profile)} {profile.blockedCount || profile.circularCount ? `• ${profile.blockedCount} blocked / ${profile.circularCount} looped` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+              {activeBoardProfile && (
+                <div className="tg-select-meta">
+                  <span>Active workspace:</span>
+                  <strong>{activeBoardOwnerLabel}</strong>
+                  <span>•</span>
+                  <strong>{activeBoardLabel}</strong>
+                </div>
+              )}
+              <div className="tg-section-note">
+                {adminDirectoryError
+                  ? adminDirectoryError
+                  : `Showing ${filteredAdminProfiles.length} of ${sortedAdminProfiles.length} users. Select a user, switch boards, and update the graph directly.`}
+              </div>
+            </div>
+          )}
+
+          <div className="tg-section">
+            <div className="tg-sec-label">Boards</div>
+            <div className="tg-field-stack">
+              <label className="tg-field-label" htmlFor="tg-board-select">
+                Active board
+                <span className="tg-field-hint">Separate task data</span>
+              </label>
+              <div className="tg-select-wrap">
+                <select
+                  id="tg-board-select"
+                  className="tg-select"
+                  value={activeWorkspaceBoardId}
+                  onChange={e=>setSelectedBoardId(e.target.value)}
+                  disabled={!boardDirectoryReady || !sortedBoardProfiles.length}
+                >
+                  <option value="">
+                    {boardDirectoryReady ? "Select a board..." : "Loading boards..."}
+                  </option>
+                  {sortedBoardProfiles.map(profile=>(
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name} {profile.taskCount ? `• ${profile.taskCount} tasks` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {activeBoardProfileSummary && (
+              <div className="tg-select-meta">
+                <span>Board:</span>
+                <strong>{activeBoardLabel}</strong>
+                <span>•</span>
+                <strong>{activeBoardOwnerLabel}</strong>
+              </div>
+            )}
+            <div className="tg-board-create-row">
+              <input
+                className="tg-input"
+                type="text"
+                placeholder="New board name…"
+                value={newBoardName}
+                onChange={e=>setNewBoardName(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&createBoard()}
+              />
+              <button
+                type="button"
+                className="tg-btn tg-btn-secondary"
+                onClick={createBoard}
+                disabled={usingLegacyBoardData || !normalizeBoardName(newBoardName) || !activeBoardUserId || !boardDirectoryReady || !!boardDirectoryError}
+              >
+                + Create Board
+              </button>
+            </div>
+            <div className="tg-section-note">
+              {usingLegacyBoardData
+                ? "Legacy single-board mode is active. Deploy the updated Firestore rules to enable multiple boards."
+                : (boardDirectoryError || "Each board keeps its own tasks, dependencies, and layout.")}
+            </div>
+          </div>
 
           {/* Stats */}
           <div className="tg-stats">
@@ -4452,8 +9043,19 @@ export default function App() {
           {/* Search */}
           <div className="tg-section">
             <div className="tg-sec-label">Search & Filter</div>
-            <input className="tg-input" type="text" placeholder="🔍  Find task…"
-              value={search} onChange={e=>setSearch(e.target.value)}/>
+            <div className="tg-search-input-row">
+              <input className="tg-input" type="text" placeholder="🔍  Find task…"
+                value={search} onChange={e=>setSearch(e.target.value)}/>
+              <button
+                type="button"
+                className="tg-search-reset"
+                onClick={resetTaskFilters}
+                disabled={!canResetTaskFilters}
+                title={route===ROUTES.cycles ? "Return to the full board and show all tasks" : "Clear search and show all tasks"}
+              >
+                Reset
+              </button>
+            </div>
             <div className="tg-search-meta">
               <span>
                 {hasActiveTaskFilters
@@ -4478,30 +9080,32 @@ export default function App() {
             </div>
           </div>
 
-          <div className="tg-section">
-            <div className="tg-sec-label">Canvas Layout</div>
-            <div className="tg-layout-grid" aria-label="Canvas layout direction">
-              {LAYOUT_OPTIONS.map(option=>(
-                <button
-                  key={option.value}
-                  type="button"
-                  className={`tg-layout-btn ${layoutDirection===option.value ? "tg-layout-btn--active" : ""}`}
-                  onClick={()=>applyLayoutDirection(option.value)}
-                  aria-pressed={layoutDirection===option.value}
-                  title={option.label}
-                >
-                  <span className="tg-layout-btn-icon">{option.icon}</span>
-                  <span className="tg-layout-btn-copy">
-                    <span className="tg-layout-btn-title">{option.shortLabel}</span>
-                    <span className="tg-layout-btn-hint">{option.hint}</span>
-                  </span>
-                </button>
-              ))}
+          {(route===ROUTES.dashboard || route===ROUTES.admin || route===ROUTES.cycles)&&(
+            <div className="tg-section">
+              <div className="tg-sec-label">Canvas Layout</div>
+              <div className="tg-layout-grid" aria-label="Canvas layout direction">
+                {LAYOUT_OPTIONS.map(option=>(
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`tg-layout-btn ${layoutDirection===option.value ? "tg-layout-btn--active" : ""}`}
+                    onClick={()=>applyLayoutDirection(option.value)}
+                    aria-pressed={layoutDirection===option.value}
+                    title={option.label}
+                  >
+                    <span className="tg-layout-btn-icon">{option.icon}</span>
+                    <span className="tg-layout-btn-copy">
+                      <span className="tg-layout-btn-title">{option.shortLabel}</span>
+                      <span className="tg-layout-btn-hint">{option.hint}</span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+              <div className="tg-layout-note">
+                Switch between vertical and sideways task flow without changing your actual dependencies.
+              </div>
             </div>
-            <div className="tg-layout-note">
-              Switch between vertical and sideways task flow without changing your actual dependencies.
-            </div>
-          </div>
+          )}
 
           {/* Add Task */}
           <div className="tg-section">
@@ -4549,18 +9153,18 @@ export default function App() {
                 <strong>{selectedChild?.data.label||"Child"}</strong>
               </div>
             )}
-            {parent&&child&&parent===child&&(
+            {pendingDependencyValidation&&(
               <div className="tg-select-meta">
-                <span>⚠</span>
-                <strong>Choose two different tasks to create a dependency.</strong>
+                <span>{pendingDependencyValidation.blocking ? "⚠" : "⟳"}</span>
+                <strong>{pendingDependencyValidation.message}</strong>
               </div>
             )}
             <button className="tg-btn tg-btn-primary" onClick={addDep}
-              disabled={!parent||!child||parent===child||!boardSyncActive}>
+              disabled={!parent||!child||Boolean(pendingDependencyValidation?.blocking)||!boardSyncActive}>
               Link Tasks →
             </button>
             <div className="tg-section-note">
-              You can also drag from a task handle directly onto another task on the graph to create the same dependency instantly.
+              You can also drag from a task handle directly onto another task on the graph. Circular links are allowed, warned immediately, and highlighted in Cycles and Details.
             </div>
           </div>
 
@@ -4646,7 +9250,7 @@ export default function App() {
               </button>
             </div>
             <div className="tg-section-note">
-              Export saves your current tasks, dependencies, and canvas layout. Import replaces the current board with a validated TaskGraph JSON file.
+              Export saves your current tasks, dependencies, and board layout. Import replaces the current board with a validated TaskGraph JSON file.
             </div>
             <input
               ref={importFileRef}
@@ -4661,12 +9265,48 @@ export default function App() {
 
                   {/* Hints */}
           <div className="tg-hints">
-            <b>Hover</b> node → see dependencies<br/>
-            <b>Click</b> node → toggle complete<br/>
-            <b>Double-click</b> node → delete task<br/>
-            <b>Click edge</b> → remove link<br/>
-            <b>Drag handle</b> → connect tasks directly on the graph<br/>
-            <b>Use panel</b> → edit task name, change flow direction, and move board data
+            {route===ROUTES.dashboard ? (
+              <>
+                <b>Hover</b> node → see dependencies<br/>
+                <b>Click</b> node → toggle complete<br/>
+                <b>Double-click</b> node → delete task<br/>
+                <b>Click edge</b> → remove link<br/>
+                <b>Drag handle</b> → connect tasks directly on the graph<br/>
+                <b>Use filters</b> → isolate blocked, complete, or circular tasks
+              </>
+            ) : route===ROUTES.details ? (
+              <>
+                <b>Read every card</b> → inspect blockers, prerequisites, and downstream impact together<br/>
+                <b>View Graph</b> → jump a task back into the live dependency canvas<br/>
+                <b>Use filters</b> → narrow the detailed directory without losing the full-board snapshot<br/>
+                <b>Review loops</b> → open the circular workspace when a task is flagged in a loop<br/>
+                <b>Admin boards</b> → switch users here and keep the same detailed view
+              </>
+            ) : route===ROUTES.admin ? (
+              <>
+                <b>Select user</b> → switch the controlled board instantly<br/>
+                <b>Click node</b> → update task completion on the user&apos;s behalf<br/>
+                <b>Click edge</b> → remove the dependency causing a blocker or loop<br/>
+                <b>Use filters</b> → isolate blocked or circular work before taking action<br/>
+                <b>Add tasks</b> → seed missing work directly from the admin panel
+              </>
+            ) : route===ROUTES.cycles ? (
+              <>
+                <b>Review loops</b> → inspect every detected cycle in one place<br/>
+                <b>Click edge</b> → remove the dependency keeping the loop alive<br/>
+                <b>Focus chart</b> → jump straight to the dedicated circular graph<br/>
+                <b>Switch layout</b> → compare the same cycle from a clearer direction<br/>
+                <b>Select user</b> → audit another board here when using admin mode
+              </>
+            ) : (
+              <>
+                <b>Use filters</b> → narrow the task list instantly<br/>
+                <b>Open Graph</b> → jump a task back into the dependency canvas<br/>
+                <b>Mark Complete</b> → update progress from the task page<br/>
+                <b>Circular filter</b> → review every loop in one view<br/>
+                <b>Use panel</b> → rename tasks, link dependencies, and import/export data
+              </>
+            )}
           </div>
 
           {/* Reset */}
@@ -4677,86 +9317,91 @@ export default function App() {
         </div>
       </div>
 
-      {/* ══ GRAPH ══ */}
-      <div className={`tg-graph ${canvasLocked ? "tg-graph--locked" : ""}`} ref={graphRef}>
-        <div className="tg-graph-aura tg-graph-aura--one"/>
-        <div className="tg-graph-aura tg-graph-aura--two"/>
-        <div className="tg-graph-aura tg-graph-aura--three"/>
-        <div className="tg-graph-grid"/>
-        <BgCanvas dark={dark}/>
-        <div className="tg-graph-legend" aria-label="Task status color key">
-          <div className="tg-graph-legend-head">
-            <div className="tg-graph-legend-title">Task Status</div>
-            <div className="tg-graph-legend-total">{total} total</div>
-          </div>
-          <div className="tg-graph-legend-items">
-            {statusLegend.map(s=>(
-              <div className={`tg-graph-legend-item ${s.className}`} key={s.key}>
-                <span className="tg-dot"/>
-                <span>{s.label}</span>
-                <span className="tg-graph-legend-count">{s.count}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-        {showEmptyState&&(
-          <div className="tg-empty">
-            <div className="tg-empty-icon">{emptyStateIcon}</div>
-            <div className="tg-empty-t">{emptyStateTitle}</div>
-            <div className="tg-empty-s">{emptyStateSubtitle}</div>
-          </div>
-        )}
-        <ReactFlow
-          key={`flow-${layoutDirection}`}
-          nodes={styledNodes}
-          nodeTypes={nodeTypes}
-          edgeTypes={edgeTypes}
-          edges={filteredEdges.map(e=>({...e,
-            type:"dependency",
-            animated:true,
-            className:"tg-dependency-edge",
-            interactionWidth:26,
-            data:dependencyEdgeTheme,
-            style:{
-              stroke:dependencyEdgeTheme.lineStroke,
-              strokeWidth:2.6,
-            },
-          }))}
-          onNodeClick={onNodeClick}
-          onNodesChange={onNodesChange}
-          onNodeDragStart={onNodeDragStart}
-          onNodeDragStop={onNodeDragStop}
-          onEdgeClick={onEdgeClick}
-          onConnect={onConnect}
-          onConnectStart={onConnectStart}
-          onConnectEnd={onConnectEnd}
-          onInit={instance=>{flowRef.current=instance;setTimeout(()=>fitGraph(350),0);}}
-          fitView
-          fitViewOptions={{padding:graphFitPadding}}
-          connectionLineComponent={DependencyConnectionLine}
-          minZoom={CANVAS_VIEWPORT.minZoom}
-          maxZoom={CANVAS_VIEWPORT.maxZoom}
-          nodesDraggable={canvasInteractive}
-          nodesConnectable={canvasInteractive}
-          elementsSelectable={canvasInteractive}
-          panOnDrag={canvasInteractive}
-          zoomOnScroll={canvasInteractive}
-          zoomOnPinch={canvasInteractive}
-          zoomOnDoubleClick={false}
-          connectOnClick={false}
-          onlyRenderVisibleElements
-          proOptions={{hideAttribution:true}}
+      {route===ROUTES.tasks ? (
+        <TaskListPage
+          total={total}
+          visibleCount={visibleTaskCount}
+          hasActiveTaskFilters={hasActiveTaskFilters}
+          activeTaskFilterLabel={activeTaskFilterLabel}
+          statusLegend={statusLegend}
+          overviewNodes={overviewStyledNodes}
+          overviewEdges={renderedOverviewEdges}
+          layoutLabel={layoutLabel}
+          dark={dark}
+          records={filteredTaskRecords}
+          emptyStateIcon={emptyStateIcon}
+          emptyStateTitle={emptyStateTitle}
+          emptyStateSubtitle={emptyStateSubtitle}
+          circularGroups={circularDependencyDisplayGroups}
+          onReviewCircularDependencies={()=>reviewCircularDependencies(ROUTES.cycles)}
+          onShowGraph={showTaskOnGraph}
+          onTaskToggle={queueTaskToggle}
+          onTaskDelete={deleteNode}
+          onOpenGraphPage={()=>navigate(ROUTES.dashboard)}
+        />
+      ) : route===ROUTES.details ? (
+        <TaskDetailPage
+          ownerLabel={activeBoardOwnerLabel}
+          total={total}
+          visibleCount={visibleTaskCount}
+          hasActiveTaskFilters={hasActiveTaskFilters}
+          activeTaskFilterLabel={activeTaskFilterLabel}
+          statusLegend={statusLegend}
+          overviewNodes={overviewStyledNodes}
+          overviewEdges={renderedOverviewEdges}
+          layoutLabel={layoutLabel}
+          dark={dark}
+          records={filteredTaskRecords}
+          boardSummary={boardSummary}
+          emptyStateIcon={emptyStateIcon}
+          emptyStateTitle={emptyStateTitle}
+          emptyStateSubtitle={emptyStateSubtitle}
+          circularGroups={circularDependencyDisplayGroups}
+          onReviewCircularDependencies={()=>reviewCircularDependencies(ROUTES.cycles)}
+          onShowGraph={node=>showTaskOnGraph(node, isAdmin ? ROUTES.admin : ROUTES.dashboard)}
+          onTaskToggle={queueTaskToggle}
+          onTaskDelete={deleteNode}
+          onOpenGraphPage={()=>navigate(isAdmin ? ROUTES.admin : ROUTES.dashboard)}
+        />
+      ) : route===ROUTES.cycles ? (
+        <CircularDependencyPage
+          ownerLabel={activeBoardOwnerLabel}
+          total={total}
+          circularTaskCount={circularTaskCount}
+          groups={circularDependencyDisplayGroups}
+          loopRecords={circularLoopRecords}
+          statusLegend={circularStatusLegend}
+          overviewNodes={overviewStyledNodes}
+          overviewEdges={renderedOverviewEdges}
+          layoutLabel={layoutLabel}
+          dark={dark}
+          onOpenGraphPage={()=>navigate(primaryWorkspaceRoute)}
+          onFocusGraph={()=>focusVisibleGraph()}
+          onShowTask={node=>showTaskOnGraph(node, ROUTES.cycles)}
+          graphShellRef={cycleGraphShellRef}
         >
-          <MiniMap
-            nodeColor={n=>n.data?.completed?statusColors.complete:isBlocked(n.id,edges,nodes)?statusColors.blocked:statusColors.pending}
-            maskColor={miniMapMaskColor}
-            maskStrokeColor={miniMapMaskStrokeColor}
-            maskStrokeWidth={miniMapMaskStrokeWidth}
-          />
-          <Controls onInteractiveChange={setCanvasInteractive}/>
-          <Background color={dark?"rgba(0,212,255,0.08)":"rgba(148,163,184,0.18)"} gap={176} size={1.15}/>
-        </ReactFlow>
-      </div>
+          {cycleGraphWorkspace}
+        </CircularDependencyPage>
+      ) : route===ROUTES.admin ? (
+        <AdminBoardWorkspace
+          selectedUser={activeBoardProfile}
+          boardLabel={activeBoardLabel}
+          boardCount={sortedBoardProfiles.length}
+          totalUsers={sortedAdminProfiles.length}
+          filteredUserCount={filteredAdminProfiles.length}
+          summary={boardSummary}
+          blockedRecords={blockedTaskRecords}
+          circularGroups={circularDependencyDisplayGroups}
+          onFocusBlockedTasks={()=>reviewBlockedTasks(ROUTES.admin)}
+          onReviewCircularDependencies={()=>reviewCircularDependencies(ROUTES.cycles)}
+          onShowTask={node=>showTaskOnGraph(node, ROUTES.admin)}
+          graphShellRef={adminGraphShellRef}
+        >
+          {graphWorkspace}
+        </AdminBoardWorkspace>
+      ) : (
+        graphWorkspace
+      )}
 
         {/* ══ TOASTS ══ */}
         <div className="tg-toasts">

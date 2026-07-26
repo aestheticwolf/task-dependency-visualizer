@@ -19,17 +19,24 @@ export type TaskEdge = {
 
 type TaskGraph = Record<string, string[]>;
 
+export type CircularDependencyGroup = {
+  nodeIds: string[];
+  edgeIds: string[];
+};
+
 type DependencyValidationInput = {
   sourceId?: string | null;
   targetId?: string | null;
   nodes?: TaskNode[];
   edges?: TaskEdge[];
+  allowCycle?: boolean;
 };
 
 type DependencyValidationResult = {
   code: "missing-selection" | "self-link" | "missing-task" | "duplicate" | "cycle";
   type: "warn" | "error";
   message: string;
+  blocking?: boolean;
 } | null;
 
 export function buildGraph(edges: TaskEdge[]): TaskGraph {
@@ -68,6 +75,154 @@ export function hasCycle(graph: TaskGraph): boolean {
   return Object.keys(graph).some(dfs);
 }
 
+export function getCircularDependencyGroups(
+  nodes: TaskNode[] = [],
+  edges: TaskEdge[] = []
+): CircularDependencyGroup[] {
+  const adjacency = new Map<string, string[]>();
+  const nodeIds = new Set<string>();
+
+  nodes.forEach((node) => {
+    if (node?.id) {
+      nodeIds.add(node.id);
+    }
+  });
+
+  edges.forEach((edge) => {
+    if (edge?.source) {
+      nodeIds.add(edge.source);
+    }
+    if (edge?.target) {
+      nodeIds.add(edge.target);
+    }
+  });
+
+  nodeIds.forEach((nodeId) => {
+    adjacency.set(nodeId, []);
+  });
+
+  edges.forEach((edge) => {
+    if (!edge?.source || !edge?.target) {
+      return;
+    }
+
+    if (!adjacency.has(edge.source)) {
+      adjacency.set(edge.source, []);
+    }
+    if (!adjacency.has(edge.target)) {
+      adjacency.set(edge.target, []);
+    }
+
+    adjacency.get(edge.source)?.push(edge.target);
+  });
+
+  const indexMap = new Map<string, number>();
+  const lowLinkMap = new Map<string, number>();
+  const stack: string[] = [];
+  const onStack = new Set<string>();
+  const groups: CircularDependencyGroup[] = [];
+  let nextIndex = 0;
+
+  const visit = (nodeId: string) => {
+    indexMap.set(nodeId, nextIndex);
+    lowLinkMap.set(nodeId, nextIndex);
+    nextIndex += 1;
+    stack.push(nodeId);
+    onStack.add(nodeId);
+
+    for (const childId of adjacency.get(nodeId) || []) {
+      if (!indexMap.has(childId)) {
+        visit(childId);
+        lowLinkMap.set(
+          nodeId,
+          Math.min(lowLinkMap.get(nodeId) ?? 0, lowLinkMap.get(childId) ?? 0)
+        );
+      } else if (onStack.has(childId)) {
+        lowLinkMap.set(
+          nodeId,
+          Math.min(lowLinkMap.get(nodeId) ?? 0, indexMap.get(childId) ?? 0)
+        );
+      }
+    }
+
+    if ((lowLinkMap.get(nodeId) ?? -1) !== (indexMap.get(nodeId) ?? -2)) {
+      return;
+    }
+
+    const componentNodeIds: string[] = [];
+    let currentNodeId = "";
+
+    do {
+      currentNodeId = stack.pop() || "";
+      if (currentNodeId) {
+        onStack.delete(currentNodeId);
+        componentNodeIds.push(currentNodeId);
+      }
+    } while (currentNodeId && currentNodeId !== nodeId);
+
+    if (!componentNodeIds.length) {
+      return;
+    }
+
+    const componentNodeIdSet = new Set(componentNodeIds);
+    const isSelfLoop = componentNodeIds.length === 1 && edges.some(
+      (edge) => edge.source === nodeId && edge.target === nodeId
+    );
+
+    if (componentNodeIds.length === 1 && !isSelfLoop) {
+      return;
+    }
+
+    const edgeIds = edges
+      .filter(
+        (edge) => componentNodeIdSet.has(edge.source) && componentNodeIdSet.has(edge.target)
+      )
+      .map((edge) => edge.id || buildDependencyEdgeId(edge.source, edge.target))
+      .sort((left, right) => left.localeCompare(right));
+
+    groups.push({
+      nodeIds: [...componentNodeIds].sort((left, right) => left.localeCompare(right)),
+      edgeIds,
+    });
+  };
+
+  Array.from(adjacency.keys())
+    .sort((left, right) => left.localeCompare(right))
+    .forEach((nodeId) => {
+      if (!indexMap.has(nodeId)) {
+        visit(nodeId);
+      }
+    });
+
+  return groups.sort((left, right) => {
+    const leftKey = left.nodeIds.join("|");
+    const rightKey = right.nodeIds.join("|");
+    return leftKey.localeCompare(rightKey);
+  });
+}
+
+export function getCircularDependencyNodeIds(
+  nodes: TaskNode[] = [],
+  edges: TaskEdge[] = []
+): string[] {
+  return Array.from(
+    new Set(
+      getCircularDependencyGroups(nodes, edges).flatMap((group) => group.nodeIds)
+    )
+  ).sort((left, right) => left.localeCompare(right));
+}
+
+export function getCircularDependencyEdgeIds(
+  nodes: TaskNode[] = [],
+  edges: TaskEdge[] = []
+): string[] {
+  return Array.from(
+    new Set(
+      getCircularDependencyGroups(nodes, edges).flatMap((group) => group.edgeIds)
+    )
+  ).sort((left, right) => left.localeCompare(right));
+}
+
 export function getBlockingTasks(id: string, edges: TaskEdge[], nodes: TaskNode[]): TaskNode[] {
   return edges
     .filter((edge) => edge.target === id)
@@ -92,20 +247,32 @@ export function validateDependencyLink({
   targetId,
   nodes = [],
   edges = [],
+  allowCycle = false,
 }: DependencyValidationInput): DependencyValidationResult {
   if (!sourceId || !targetId) {
     return {
       code: "missing-selection",
       type: "warn",
       message: "Select both parent and child tasks before linking them.",
+      blocking: true,
     };
   }
 
   if (sourceId === targetId) {
+    if (allowCycle) {
+      return {
+        code: "self-link",
+        type: "warn",
+        message: "This link makes the task depend on itself, creating a circular dependency.",
+        blocking: false,
+      };
+    }
+
     return {
       code: "self-link",
       type: "warn",
       message: "A task cannot depend on itself. Choose two different tasks.",
+      blocking: true,
     };
   }
 
@@ -115,6 +282,7 @@ export function validateDependencyLink({
       code: "missing-task",
       type: "warn",
       message: "One or both selected tasks no longer exist. Refresh the task list and try again.",
+      blocking: true,
     };
   }
 
@@ -123,6 +291,7 @@ export function validateDependencyLink({
       code: "duplicate",
       type: "warn",
       message: "Dependency already exists.",
+      blocking: true,
     };
   }
 
@@ -133,10 +302,20 @@ export function validateDependencyLink({
   };
 
   if (hasCycle(buildGraph([...edges, nextEdge]))) {
+    if (allowCycle) {
+      return {
+        code: "cycle",
+        type: "warn",
+        message: "This link creates a circular dependency. It will be highlighted in Cycles and Details.",
+        blocking: false,
+      };
+    }
+
     return {
       code: "cycle",
       type: "error",
       message: "Circular dependency detected. Choose a different task relationship.",
+      blocking: true,
     };
   }
 
@@ -205,10 +384,18 @@ export function matchesTaskViewFilter(
   node: TaskNode,
   edges: TaskEdge[],
   nodes: TaskNode[],
-  filterId = "all"
+  filterId = "all",
+  circularNodeIds?: Set<string> | string[]
 ): boolean {
   if (filterId === "all") {
     return true;
+  }
+
+  if (filterId === "cycle") {
+    const cycleNodeIdSet = circularNodeIds instanceof Set
+      ? circularNodeIds
+      : new Set(circularNodeIds || getCircularDependencyNodeIds(nodes, edges));
+    return cycleNodeIdSet.has(node.id);
   }
 
   const status = getTaskWorkflowStatus(node, edges, nodes);

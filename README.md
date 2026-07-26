@@ -7,6 +7,7 @@ It helps users create tasks, link prerequisites, detect invalid dependency chain
 
 This project was built as a Task Dependency Visualizer with a professional workflow-oriented UI.  
 Each authenticated user gets a private board where tasks are stored as nodes and dependencies are stored as graph edges.
+The app also keeps a lightweight per-user summary document so admins can review boards from one control panel.
 
 Core outcomes:
 
@@ -14,8 +15,50 @@ Core outcomes:
 - Link tasks through dependency relationships
 - Prevent circular and invalid dependencies
 - Highlight blocked tasks automatically
+- Give admins a cross-user control panel for board review and intervention
 - Persist each user board with Firebase Authentication and Cloud Firestore
 - Support search, filtering, board export/import, and responsive interaction
+
+## Important Scope
+
+These are the most important requirements for the Task Dependency Visualizer:
+
+- Show tasks as nodes
+- Show dependencies as directed edges
+- Add tasks
+- Add dependencies
+- Detect circular dependencies
+- Prevent circular dependency creation
+- Highlight blocked tasks
+- Mark tasks complete or pending
+- Remove dependency links
+- Save tasks and dependencies in Firestore
+- Let admins view and act on a user&apos;s board
+
+Blocked task rule:
+
+- A task is blocked if at least one prerequisite task is not completed
+
+## Build Order
+
+Use this order when building or checking the feature set:
+
+1. Core graph
+   Show tasks as nodes and dependencies as directed edges.
+2. Task creation
+   Allow users to add tasks.
+3. Dependency creation
+   Allow users to connect one task to another.
+4. Blocked task logic
+   Mark a task as blocked when a prerequisite is incomplete.
+5. Circular dependency protection
+   Detect loops and prevent invalid circular links.
+6. Task actions
+   Mark complete or pending, and remove dependency links.
+7. Firestore persistence
+   Save and load tasks and dependencies.
+8. Admin control
+   Let admins open a user board, see the chart, and take action.
 
 ## Key Features
 
@@ -33,6 +76,13 @@ Core outcomes:
 - Prevent self-links and duplicate links
 - Block completion when prerequisite tasks are still pending
 - Highlight blocked tasks in the graph and status summary
+
+### Admin control panel
+
+- Admin-only route for switching between user boards
+- User directory with synced board-health summaries
+- Cross-user graph inspection with blocked-task and circular-dependency alerts
+- Admin task actions including add, rename, link, complete, delete, import, and reset
 
 ### Graph UI
 
@@ -80,6 +130,7 @@ Core outcomes:
 ```text
 src/
   App.tsx                 Main dashboard and graph experience
+  adminLogic.ts           Admin summaries, directory helpers, and sorting
   Landing.tsx             Marketing / landing page
   Login.tsx               Sign-in flow and shared auth shell
   Signup.tsx              Sign-up flow
@@ -159,6 +210,8 @@ Create a Firestore database in your Firebase project and publish the rules from 
 This project stores data under:
 
 ```text
+admins/{uid}
+users/{uid}
 users/{uid}/nodes
 users/{uid}/edges
 ```
@@ -167,11 +220,23 @@ The included rules enforce:
 
 - authenticated access only
 - owner-only board access
+- admin override access through `admins/{uid}`
+- validated user summary documents
 - node document validation
 - edge document validation
 - self-link prevention at the rules layer
 
-### 6. Start the development server
+### 6. Configure admin access
+
+To grant admin access to a user:
+
+1. Find that user&apos;s Firebase Authentication `uid`
+2. Create a Firestore document at `admins/{uid}`
+3. Publish the updated [firestore.rules](firestore.rules)
+
+Once this exists, the user will see the **Admin** route in the app and can inspect or control any synced user board.
+
+### 7. Start the development server
 
 ```bash
 npm start
@@ -237,6 +302,14 @@ Creates an optimized production build in the `build/` folder.
 5. Complete prerequisite tasks to unlock blocked tasks
 6. Search, filter, move, or export the board as needed
 
+### Admin workflow
+
+1. Sign in with a user whose `uid` exists under `admins/{uid}`
+2. Open the `Admin` route from the workspace switcher
+3. Search for a user and load their board
+4. Review blocked tasks and circular loops
+5. Use the same graph controls to add tasks, remove links, or update completion state on that user&apos;s board
+
 ## Dependency Rules
 
 TaskGraph enforces these core logic rules:
@@ -282,12 +355,32 @@ Firestore edge document IDs follow:
 sourceId__targetId
 ```
 
+### User summary shape
+
+```json
+{
+  "uid": "firebase-user-id",
+  "email": "user@example.com",
+  "displayName": "Richard",
+  "taskCount": 8,
+  "completedCount": 3,
+  "pendingCount": 5,
+  "blockedCount": 2,
+  "readyCount": 2,
+  "unlinkedCount": 1,
+  "circularCount": 1,
+  "dependencyCount": 7,
+  "updatedAt": "2026-05-11T10:00:00.000Z"
+}
+```
+
 ## Testing Coverage
 
 The test suite currently covers:
 
 - dependency validation
 - cycle detection
+- admin board summaries and directory helpers
 - blocked-task logic
 - status summaries
 - auth validation
@@ -297,6 +390,7 @@ The test suite currently covers:
 Main test files:
 
 - [src/App.test.tsx](src/App.test.tsx)
+- [src/adminLogic.test.ts](src/adminLogic.test.ts)
 - [src/taskLogic.test.ts](src/taskLogic.test.ts)
 - [src/boardTransfer.test.ts](src/boardTransfer.test.ts)
 - [src/authValidation.test.ts](src/authValidation.test.ts)
